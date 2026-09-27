@@ -1,0 +1,37 @@
+{
+  "name": "qa-agent",
+  "version": "0.1.0",
+  "description": "Autonomous website QA agent",
+  "scripts": {
+    "test": "playwright test",
+    "crawl": "tsx src/crawl.ts --mode=anon",
+    "crawl:auth": "tsx src/crawl.ts --mode=auth",
+    "report": "tsx src/report.ts",
+    "qa": "tsx src/qa.ts",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "tsx --test src/*.test.ts",
+    "email:selftest": "tsx src/email/selftest.ts",
+    "email:wait": "tsx src/email/waittest.ts",
+    "export:burp": "tsx src/export-burp.ts"
+  },
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "dotenv": "^18.0.4",
+    "imapflow": "^2.0.8",
+    "mailparser": "^3.9.28",
+    "playwright": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

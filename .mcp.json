@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.82",
+        "--headless",
+        "--isolated",
+        "--browser=chrome",
+        "--viewport-size=1366x768",
+        "--storage-state=output/auth/state.json",
+        "--output-dir=output/mcp",
+        "--block-service-workers",
+        "--blocked-origins=https://google-analytics.com;https://www.google-analytics.com;https://googletagmanager.com;https://www.googletagmanager.com;https://connect.facebook.net;https://static.hotjar.com;https://doubleclick.net;https://cdn.optimizely.com;https://log.optimizely.com",
+        "--timeout-navigation=60000",
+        "--image-responses=omit"
+      ]
+    },
+    "email": {
+      "command": "npx",
+      "args": ["tsx", "src/email/mcp-server.ts"]
+    }
+  }
+}

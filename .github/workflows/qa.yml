@@ -1,0 +1,89 @@
+name: QA
+
+on:
+  schedule:
+    # 02:30 UTC nightly
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+# A nightly run and a manual dispatch would otherwise race for the same artifact name.
+concurrency:
+  group: qa-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # NOTE: secrets are deliberately NOT set at job level. At job level they are also in
+    # the environment of `npm ci`, where every dependency's install script can read them.
+    # Each step below gets only what it needs.
+    env:
+      EMAIL_PROVIDER: ${{ vars.EMAIL_PROVIDER || 'mailtm' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      # --ignore-scripts above skips Playwright's own postinstall, so browsers are
+      # installed explicitly below. Any other package needing a build step must be
+      # listed here deliberately rather than running arbitrary code by default.
+
+      # Keyed on the Playwright version so a bump fetches fresh browsers.
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.pw.outputs.version }}
+
+      # `playwright install` is a no-op when the browser is already present, so running it
+      # unconditionally costs nothing on a cache hit and repairs a cache that was saved
+      # from a run where the install died half way. Keying alone cannot detect that.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - run: npx tsc --noEmit
+
+      - name: Unit tests (offline)
+        run: npx tsx --test src/*.test.ts
+
+      - name: Run QA pipeline
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+        run: npm run qa
+
+      # The HTML report and the Playwright HTML report are safe to share.
+      #
+      # DELIBERATELY EXCLUDED, do not add them back:
+      #   output/auth/state.json   - the live session cookie
+      #   output/test-results      - Playwright TRACES. A trace records every request the
+      #                              test made, headers included, so it carries the
+      #                              session cookie and any Authorization header.
+      #   output/http-history.*    - a verbatim capture of every request, cookies included.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-report
+          path: |
+            output/report.html
+            output/pw-report/index.html
+          if-no-files-found: warn
+          retention-days: 14
