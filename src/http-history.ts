@@ -275,7 +275,7 @@ export function burpTime(date: Date): string {
  */
 function stripInvalidXml(value: string): string {
   return value
-    .replace(/[ --￾￿]/g, "")
+    .replace(/[\u0000-\u0008\u000e-\u001f￾￿]/g, "")
     .replace(/[\ud800-\udbff](?![\udc00-\udfff])/g, "")
     .replace(/(?<![\ud800-\udbff])[\udc00-\udfff]/g, "");
 }
