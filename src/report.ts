@@ -191,7 +191,12 @@ function main(): void {
   const anon = dedupe(readJsonl<Partial<PageRecord>>("pages.jsonl").map(normalizePage));
   const auth = dedupe(readJsonl<Partial<PageRecord>>("pages.auth.jsonl").map(normalizePage));
   const pages = [...anon, ...auth];
-  const findings = readJsonl<Finding>("findings.jsonl").map((f) => ({
+  // Phase 5's exploration findings and the pre-deploy scan's are the same shape and belong
+  // in one table - a reader wants "what is wrong with this build", not two lists.
+  const findings = [
+    ...readJsonl<Finding>("findings.jsonl"),
+    ...readJsonl<Finding>("deploy-findings.jsonl"),
+  ].map((f) => ({
     ...f,
     // An unrecognised severity used to match no bucket, so the finding silently vanished
     // from the report. Unknown severities are shown, not dropped.

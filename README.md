@@ -49,6 +49,8 @@ see [docs/email.md](docs/email.md) if your site rejects disposable domains.
 | `npm run crawl:auth` | Crawl logged in → `output/pages.auth.jsonl` |
 | `npm test` | Playwright suite |
 | `npm run test:unit` | Offline regression tests — no browser, no network |
+| `npm run predeploy` | Pre-deploy hygiene scan — what you forgot to remove |
+| `npm run coverage` | What the crawl found that nothing tests |
 | `npm run report` | Build `output/report.html` |
 | `npm run export:burp` | Rebuild `output/http-history.xml` from the capture |
 | `npm run qa` | Everything, in order |

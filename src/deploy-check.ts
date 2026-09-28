@@ -1,0 +1,590 @@
+/**
+ * Pre-deploy hygiene scan: what did you forget to take out before shipping?
+ *
+ *   npm run predeploy
+ *
+ * Three passes, all read-only and all scoped to allowedOrigins:
+ *
+ *   1. Probe well-known paths that should not exist in production (/.env, /.git/HEAD,
+ *      /actuator, /swagger-ui.html, backups, dumps).
+ *   2. Scan the HTML already captured by the crawl for leftovers - source maps, debug
+ *      statements, staging hostnames, credential-shaped strings, stack traces, TODOs.
+ *   3. If an HTTP capture exists, audit response headers for the security headers a
+ *      production deploy is expected to set, and for version disclosure.
+ *
+ * Findings go to output/deploy-findings.jsonl in the same shape as findings.jsonl, so the
+ * report and the qa gate pick them up without special-casing.
+ */
+import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
+import type { PageRecord } from "./crawl.js";
+import { readHistory, type HttpExchange } from "./http-history.js";
+
+const OUT = resolve(ROOT, "output");
+const FINDINGS = resolve(OUT, "deploy-findings.jsonl");
+
+export type Severity = "critical" | "high" | "medium" | "low";
+
+export interface DeployFinding {
+  id: string;
+  url: string;
+  feature: string;
+  severity: Severity;
+  steps: string[];
+  expected: string;
+  actual: string;
+  evidence?: string;
+  source: "probe" | "content" | "headers";
+}
+
+// ---------------------------------------------------------------- path probes
+
+interface Probe {
+  path: string;
+  label: string;
+  severity: Severity;
+  /** Extra confirmation that the body really is the thing, not a SPA catch-all 200. */
+  confirm?: (body: string, contentType: string) => boolean;
+}
+
+const PROBES: Probe[] = [
+  { path: "/.env", label: "Environment file", severity: "critical",
+    confirm: (b) => /^[A-Z_][A-Z0-9_]*\s*=/m.test(b) },
+  { path: "/.git/HEAD", label: "Git repository", severity: "critical",
+    confirm: (b) => /^ref:\s+refs\//m.test(b) || /^[0-9a-f]{40}$/m.test(b.trim()) },
+  { path: "/.git/config", label: "Git config", severity: "critical",
+    confirm: (b) => /\[core\]|\[remote /.test(b) },
+  { path: "/.svn/entries", label: "Subversion metadata", severity: "high" },
+  { path: "/.DS_Store", label: "macOS directory index", severity: "low" },
+  { path: "/phpinfo.php", label: "phpinfo()", severity: "critical",
+    confirm: (b) => /phpinfo\(\)|PHP Version/i.test(b) },
+  { path: "/server-status", label: "Apache server-status", severity: "high",
+    confirm: (b) => /Apache Server Status|Server uptime/i.test(b) },
+  { path: "/actuator", label: "Spring Actuator root", severity: "high",
+    confirm: (b, ct) => ct.includes("json") && /_links|health/.test(b) },
+  { path: "/actuator/env", label: "Spring Actuator env (leaks config)", severity: "critical",
+    confirm: (b, ct) => ct.includes("json") },
+  { path: "/actuator/heapdump", label: "Spring Actuator heapdump", severity: "critical" },
+  { path: "/swagger-ui.html", label: "Swagger UI", severity: "medium" },
+  { path: "/api-docs", label: "API docs endpoint", severity: "medium" },
+  { path: "/v2/api-docs", label: "Swagger v2 spec", severity: "medium" },
+  { path: "/openapi.json", label: "OpenAPI spec", severity: "medium" },
+  { path: "/graphql", label: "GraphQL endpoint (check introspection)", severity: "medium" },
+  { path: "/debug", label: "Debug endpoint", severity: "high" },
+  { path: "/_debug", label: "Debug endpoint", severity: "high" },
+  { path: "/debug/pprof/", label: "Go pprof profiler", severity: "critical" },
+  { path: "/adminer.php", label: "Adminer DB console", severity: "critical" },
+  { path: "/phpmyadmin/", label: "phpMyAdmin", severity: "critical" },
+  { path: "/wp-config.php.bak", label: "WordPress config backup", severity: "critical" },
+  { path: "/backup.zip", label: "Backup archive", severity: "critical" },
+  { path: "/backup.sql", label: "Database dump", severity: "critical" },
+  { path: "/dump.sql", label: "Database dump", severity: "critical" },
+  { path: "/db.sqlite", label: "SQLite database", severity: "critical" },
+  { path: "/docker-compose.yml", label: "docker-compose file", severity: "high",
+    confirm: (b) => /^\s*(services|version)\s*:/m.test(b) },
+  { path: "/Dockerfile", label: "Dockerfile", severity: "medium",
+    confirm: (b) => /^\s*FROM\s+\S/mi.test(b) },
+  { path: "/package.json", label: "package.json (dependency inventory)", severity: "low",
+    confirm: (b) => /"(dependencies|devDependencies|name)"\s*:/.test(b) },
+  { path: "/composer.lock", label: "composer.lock", severity: "low" },
+  { path: "/yarn.lock", label: "yarn.lock", severity: "low" },
+  { path: "/.htaccess", label: "Apache .htaccess", severity: "medium" },
+  { path: "/web.config", label: "IIS web.config", severity: "medium",
+    confirm: (b) => /<configuration/i.test(b) },
+  { path: "/crossdomain.xml", label: "Flash crossdomain policy", severity: "low" },
+  { path: "/.well-known/security.txt", label: "security.txt (informational - absence is fine)", severity: "low" },
+];
+
+/**
+ * A site that answers 200 to everything makes every probe a false positive. Establish the
+ * baseline first with a path that certainly does not exist.
+ */
+async function catchAllBaseline(base: string, timeoutMs: number): Promise<{ status: number; length: number } | null> {
+  const probe = `${base}/__qa_agent_definitely_not_here_${Date.now().toString(36)}`;
+  try {
+    const res = await fetch(probe, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+    const body = await res.text();
+    return { status: res.status, length: body.length };
+  } catch {
+    return null;
+  }
+}
+
+async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFinding[]> {
+  const base = cfg.baseUrl.replace(/\/$/, "");
+  const found: DeployFinding[] = [];
+  const baseline = await catchAllBaseline(base, timeoutMs);
+
+  if (baseline && baseline.status === 200) {
+    console.log(
+      `  note: this origin answers 200 to a nonsense path (${baseline.length} bytes) - ` +
+        `probes are confirmed against body content, and unconfirmable ones are skipped.`,
+    );
+  }
+
+  let n = 0;
+  for (const probe of PROBES) {
+    const url = `${base}${probe.path}`;
+    if (!isAllowedUrl(url, cfg)) continue;
+    // Never request something the deny-list considers destructive.
+    if (isDeniedUrl(url, cfg)) continue;
+
+    try {
+      const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      if (res.status !== 200) continue;
+
+      const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+      const body = (await res.text()).slice(0, 20000);
+
+      // A catch-all 200 of the same size as our nonsense probe is the SPA index page.
+      const looksLikeCatchAll =
+        baseline?.status === 200 && Math.abs(body.length - baseline.length) < 64;
+
+      if (probe.confirm) {
+        if (!probe.confirm(body, contentType)) continue;
+      } else if (looksLikeCatchAll) {
+        continue;
+      }
+
+      found.push({
+        id: `D-P${String(++n).padStart(2, "0")}`,
+        url,
+        feature: `Exposed: ${probe.label}`,
+        severity: probe.severity,
+        steps: [`GET ${probe.path}`, "Observe HTTP 200 with real content"],
+        expected: "404, or the path is not deployed at all",
+        actual: `HTTP 200, ${body.length} bytes, content-type "${contentType || "none"}"`,
+        evidence: body.slice(0, 200).replace(/\s+/g, " ").trim(),
+        source: "probe",
+      });
+    } catch {
+      // Timeouts and connection errors are not findings.
+    }
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------- content scan
+
+interface Pattern {
+  name: string;
+  re: RegExp;
+  severity: Severity;
+  expected: string;
+  /** Drop matches that are obviously not real (example keys, docs). */
+  ignore?: RegExp;
+}
+
+const CONTENT_PATTERNS: Pattern[] = [
+  {
+    name: "Source map reference",
+    re: /\/\/[#@]\s*sourceMappingURL=([^\s*]+)/g,
+    severity: "medium",
+    expected: "Source maps are not published, or are restricted to internal access",
+  },
+  {
+    name: "Staging or localhost reference",
+    re: /\b(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|host\.docker\.internal|[a-z0-9-]*(?:staging|dev|test|uat|qa|sandbox)\.[a-z0-9.-]+)(?::\d+)?\b/gi,
+    severity: "medium",
+    expected: "Production pages reference production hosts only",
+    ignore: /schema|w3\.org|example\.(com|org)/i,
+  },
+  {
+    name: "Debug statement in inline script",
+    re: /\b(?:console\.(?:log|debug|warn|trace|table)|debugger)\s*[;(]/g,
+    severity: "low",
+    expected: "Debug statements are stripped from production bundles",
+  },
+  {
+    name: "TODO / FIXME left in served markup",
+    re: /\b(?:TODO|FIXME|XXX|HACK|TEMP HACK|REMOVE ME|DO NOT SHIP)\b[:\s][^\n<]{0,80}/g,
+    severity: "low",
+    expected: "Work-in-progress notes are not served to users",
+  },
+  {
+    name: "HTML comment mentioning a secret",
+    re: /<!--(?:(?!-->)[\s\S]){0,400}?\b(?:password|passwd|secret|api[_-]?key|token|credential)\b(?:(?!-->)[\s\S]){0,200}?-->/gi,
+    severity: "high",
+    expected: "No commented-out credentials or secret references in markup",
+  },
+  {
+    name: "AWS access key id",
+    re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+    severity: "critical",
+    expected: "No cloud credentials in client-delivered content",
+  },
+  {
+    name: "Google API key",
+    re: /\bAIza[0-9A-Za-z_-]{35}\b/g,
+    severity: "high",
+    expected: "No unrestricted API keys in client-delivered content",
+  },
+  {
+    name: "Stripe live secret key",
+    re: /\bsk_live_[0-9A-Za-z]{16,}\b/g,
+    severity: "critical",
+    expected: "No live payment secret keys in client-delivered content",
+  },
+  {
+    name: "GitHub token",
+    re: /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[0-9A-Za-z_]{20,}\b/g,
+    severity: "critical",
+    expected: "No version-control tokens in client-delivered content",
+  },
+  {
+    name: "Slack token",
+    re: /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g,
+    severity: "critical",
+    expected: "No chat tokens in client-delivered content",
+  },
+  {
+    name: "Private key block",
+    re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/g,
+    severity: "critical",
+    expected: "No private keys in client-delivered content",
+  },
+  {
+    name: "JWT in page content",
+    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    severity: "high",
+    expected: "Tokens are not embedded in HTML delivered to the browser",
+  },
+  {
+    name: "Server stack trace",
+    re: /(?:Traceback \(most recent call last\)|\bat [\w.$]+\([^)]*:\d+:\d+\)|Exception in thread|java\.lang\.\w+Exception|Fatal error:.*on line \d+)/g,
+    severity: "high",
+    expected: "Users see a friendly error page, never a stack trace",
+  },
+  {
+    name: "Framework debug page",
+    re: /(?:Whoops, looks like something went wrong|DEBUG\s*=\s*True|Werkzeug Debugger|Rails\.application\.config|You're seeing this error because you have <code>DEBUG)/g,
+    severity: "critical",
+    expected: "Debug mode is off in production",
+  },
+  {
+    name: "Placeholder or lorem content",
+    re: /\b(?:lorem ipsum|dolor sit amet|Placeholder text|TBD|coming soon|test user|dummy data|foo@bar\.com|test@test\.com)\b/gi,
+    severity: "low",
+    expected: "Real copy and real data, not placeholders",
+  },
+  {
+    name: "Directory listing",
+    re: /<title>Index of \/|<h1>Index of \//g,
+    severity: "high",
+    expected: "Directory listing is disabled",
+  },
+];
+
+function scanContent(pages: PageRecord[], html: Map<string, string>): DeployFinding[] {
+  const found: DeployFinding[] = [];
+  let n = 0;
+  // A URL appears in both pages.jsonl and pages.auth.jsonl; report each leftover once.
+  const reported = new Set<string>();
+
+  for (const page of pages) {
+    const body = html.get(page.url);
+    if (!body) continue;
+
+    for (const pattern of CONTENT_PATTERNS) {
+      const re = new RegExp(pattern.re.source, pattern.re.flags);
+      const hits = new Set<string>();
+      for (let m = re.exec(body); m !== null; m = re.exec(body)) {
+        const hit = m[0].replace(/\s+/g, " ").trim().slice(0, 120);
+        if (pattern.ignore?.test(hit)) continue;
+        hits.add(hit);
+        if (hits.size >= 5) break;
+      }
+      if (hits.size === 0) continue;
+
+      const key = `${page.url}::${pattern.name}`;
+      if (reported.has(key)) continue;
+      reported.add(key);
+
+      found.push({
+        id: `D-C${String(++n).padStart(2, "0")}`,
+        url: page.url,
+        feature: pattern.name,
+        severity: pattern.severity,
+        steps: [`Open ${page.url}`, "View source", `Search for: ${pattern.name}`],
+        expected: pattern.expected,
+        actual: `${hits.size} match(es): ${[...hits].join(" | ").slice(0, 300)}`,
+        source: "content",
+      });
+    }
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------- header audit
+
+interface HeaderRule {
+  header: string;
+  name: string;
+  severity: Severity;
+  expected: string;
+  /** Only applies when this returns true. */
+  applies?: (x: HttpExchange, headers: Map<string, string>) => boolean;
+  /** Present but wrong is worse than absent - flag the value too. */
+  badValue?: RegExp;
+}
+
+const HEADER_RULES: HeaderRule[] = [
+  { header: "content-security-policy", name: "Missing Content-Security-Policy", severity: "medium",
+    expected: "A CSP restricting script sources",
+    applies: (_x, h) => (h.get("content-type") ?? "").includes("html") },
+  { header: "x-content-type-options", name: "Missing X-Content-Type-Options", severity: "low",
+    expected: "nosniff" },
+  { header: "strict-transport-security", name: "Missing HSTS on an HTTPS response", severity: "medium",
+    expected: "Strict-Transport-Security with a max-age",
+    applies: (x) => x.protocol === "https" },
+  { header: "x-frame-options", name: "Missing clickjacking protection", severity: "low",
+    expected: "X-Frame-Options, or frame-ancestors in the CSP",
+    applies: (_x, h) => (h.get("content-type") ?? "").includes("html") && !(h.get("content-security-policy") ?? "").includes("frame-ancestors") },
+  { header: "referrer-policy", name: "Missing Referrer-Policy", severity: "low",
+    expected: "A Referrer-Policy such as strict-origin-when-cross-origin",
+    applies: (_x, h) => (h.get("content-type") ?? "").includes("html") },
+];
+
+/** Headers that disclose software versions. */
+const DISCLOSURE = [
+  { header: "server", re: /\d+\.\d+/, name: "Server version disclosed" },
+  { header: "x-powered-by", re: /./, name: "X-Powered-By disclosed" },
+  { header: "x-aspnet-version", re: /./, name: "ASP.NET version disclosed" },
+  { header: "x-generator", re: /./, name: "Generator disclosed" },
+];
+
+function parseHeaders(rawB64: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const raw = Buffer.from(rawB64, "base64").toString("utf8");
+  const head = raw.split("\r\n\r\n")[0] ?? "";
+  for (const line of head.split("\r\n").slice(1)) {
+    const i = line.indexOf(":");
+    if (i > 0) map.set(line.slice(0, i).trim().toLowerCase(), line.slice(i + 1).trim());
+  }
+  return map;
+}
+
+function auditHeaders(history: HttpExchange[]): DeployFinding[] {
+  const found: DeployFinding[] = [];
+  // Report each problem once, against the first URL that shows it - not 469 times.
+  const seen = new Set<string>();
+  let n = 0;
+
+  const add = (key: string, f: Omit<DeployFinding, "id" | "source">): void => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({ ...f, id: `D-H${String(++n).padStart(2, "0")}`, source: "headers" });
+  };
+
+  for (const x of history) {
+    if (x.status >= 300 && x.status < 400) continue;
+    let headers: Map<string, string>;
+    try {
+      headers = parseHeaders(x.response);
+    } catch {
+      continue;
+    }
+    if (headers.size === 0) continue;
+
+    for (const rule of HEADER_RULES) {
+      if (rule.applies && !rule.applies(x, headers)) continue;
+      if (headers.has(rule.header)) continue;
+      add(rule.name, {
+        url: x.url,
+        feature: rule.name,
+        severity: rule.severity,
+        steps: [`GET ${x.path}`, `Inspect response headers for ${rule.header}`],
+        expected: rule.expected,
+        actual: `${rule.header} is absent`,
+      });
+    }
+
+    for (const d of DISCLOSURE) {
+      const v = headers.get(d.header);
+      if (v && d.re.test(v)) {
+        add(d.name, {
+          url: x.url,
+          feature: d.name,
+          severity: "low",
+          steps: [`GET ${x.path}`, `Inspect the ${d.header} response header`],
+          expected: "Software versions are not advertised",
+          actual: `${d.header}: ${v}`,
+        });
+      }
+    }
+
+    // Cookie flags
+    for (const [k, v] of headers) {
+      if (k !== "set-cookie") continue;
+      const name = v.split("=")[0] ?? "cookie";
+      const missing = [
+        !/;\s*httponly/i.test(v) ? "HttpOnly" : "",
+        !/;\s*secure/i.test(v) && x.protocol === "https" ? "Secure" : "",
+        !/;\s*samesite/i.test(v) ? "SameSite" : "",
+      ].filter(Boolean);
+      if (missing.length) {
+        add(`cookie:${name}:${missing.join(",")}`, {
+          url: x.url,
+          feature: `Cookie "${name}" missing ${missing.join(", ")}`,
+          severity: missing.includes("HttpOnly") || missing.includes("Secure") ? "medium" : "low",
+          steps: [`GET ${x.path}`, "Inspect the Set-Cookie header"],
+          expected: "Session cookies set HttpOnly, Secure and SameSite",
+          actual: v.slice(0, 160),
+        });
+      }
+    }
+
+    // Permissive CORS
+    const acao = headers.get("access-control-allow-origin");
+    if (acao === "*" && headers.get("access-control-allow-credentials") === "true") {
+      add("cors", {
+        url: x.url,
+        feature: "CORS allows any origin with credentials",
+        severity: "high",
+        steps: [`GET ${x.path}`, "Inspect Access-Control-Allow-* headers"],
+        expected: "A credentialed endpoint names its allowed origins explicitly",
+        actual: "Access-Control-Allow-Origin: * with Allow-Credentials: true",
+      });
+    }
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------- driver
+
+function readPages(): PageRecord[] {
+  const out: PageRecord[] = [];
+  for (const name of ["pages.jsonl", "pages.auth.jsonl"]) {
+    const file = resolve(OUT, name);
+    if (!existsSync(file)) continue;
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line) as PageRecord);
+      } catch {
+        /* partial line */
+      }
+    }
+  }
+  return out;
+}
+
+/** Page HTML, taken from the capture when present - otherwise re-fetched. */
+async function collectHtml(
+  pages: PageRecord[],
+  history: HttpExchange[],
+  cfg: QaConfig,
+  timeoutMs: number,
+): Promise<Map<string, string>> {
+  const html = new Map<string, string>();
+
+  for (const x of history) {
+    if (!x.mimeType.includes("HTML") && !x.mimeType.includes("script")) continue;
+    try {
+      const raw = Buffer.from(x.response, "base64").toString("utf8");
+      const body = raw.slice(raw.indexOf("\r\n\r\n") + 4);
+      if (body) html.set(x.url, body);
+    } catch {
+      /* skip */
+    }
+  }
+  if (html.size > 0) {
+    console.log(`  content: ${html.size} document(s) from the existing capture`);
+    return html;
+  }
+
+  // No capture - fetch the crawled pages directly. Cheap: one GET each, no browser.
+  const targets = pages.filter((p) => p.ok !== false && isAllowedUrl(p.url, cfg)).slice(0, 80);
+  console.log(`  content: no capture found, fetching ${targets.length} page(s) directly`);
+  let ok = 0;
+  for (const p of targets) {
+    try {
+      const res = await fetch(p.url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (res.ok) {
+        html.set(p.url, (await res.text()).slice(0, 500_000));
+        ok++;
+      }
+    } catch {
+      /* unreachable page */
+    }
+  }
+  console.log(`  content: fetched ${ok}`);
+  return html;
+}
+
+const RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+
+async function main(): Promise<void> {
+  const cfg = loadConfig();
+  if (!cfg.baseUrl) throw new Error("Set baseUrl in qa.config.json first.");
+  const timeoutMs = Math.min(cfg.navTimeoutMs, 20000);
+
+  console.log(`Pre-deploy scan of ${cfg.baseUrl}\n`);
+
+  console.log(`probing ${PROBES.length} well-known path(s) ...`);
+  const probeFindings = await runProbes(cfg, timeoutMs);
+  console.log(`  ${probeFindings.length} exposed\n`);
+
+  const pages = readPages();
+  const history = existsSync(resolve(OUT, "http-history.jsonl")) ? readHistory() : [];
+  if (pages.length === 0 && history.length === 0) {
+    console.log("No crawl data found - run `npm run crawl` first for the content scan.\n");
+  }
+
+  console.log("scanning page content for leftovers ...");
+  const html = await collectHtml(pages, history, cfg, timeoutMs);
+  const contentFindings = scanContent(pages, html);
+  console.log(`  ${contentFindings.length} finding(s)\n`);
+
+  let headerFindings: DeployFinding[] = [];
+  if (history.length) {
+    console.log(`auditing response headers across ${history.length} exchange(s) ...`);
+    headerFindings = auditHeaders(history);
+    console.log(`  ${headerFindings.length} finding(s)\n`);
+  } else {
+    console.log("header audit skipped - enable captureHttpHistory and re-crawl to include it.\n");
+  }
+
+  const all = [...probeFindings, ...contentFindings, ...headerFindings].sort(
+    (a, b) => RANK[a.severity] - RANK[b.severity],
+  );
+
+  rmSync(FINDINGS, { force: true });
+  for (const f of all) appendFileSync(FINDINGS, `${JSON.stringify(f)}\n`);
+
+  const bySeverity = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const f of all) bySeverity[f.severity]++;
+
+  console.log("=".repeat(62));
+  console.log(
+    `critical ${bySeverity.critical}   high ${bySeverity.high}   ` +
+      `medium ${bySeverity.medium}   low ${bySeverity.low}`,
+  );
+  for (const f of all.slice(0, 15)) {
+    console.log(`  [${f.severity.padEnd(8)}] ${f.feature}`);
+    console.log(`             ${f.url}`);
+  }
+  if (all.length > 15) console.log(`  ... and ${all.length - 15} more`);
+  console.log(`\nwrote ${FINDINGS}`);
+
+  const blocking = bySeverity.critical + bySeverity.high;
+  if (blocking > 0) {
+    console.error(`\nNOT READY TO DEPLOY: ${blocking} critical/high finding(s).`);
+    process.exit(1);
+  }
+  console.log("\nNo critical or high findings.");
+}
+
+const isEntry = process.argv[1]
+  ? resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname.replace(/^\//, ""))
+  : false;
+
+if (isEntry || process.argv[1]?.endsWith("deploy-check.ts")) {
+  main().catch((err: unknown) => {
+    console.error(`Pre-deploy scan failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}
+
+export { runProbes, scanContent, auditHeaders, CONTENT_PATTERNS, PROBES };

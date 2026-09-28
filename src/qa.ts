@@ -40,6 +40,10 @@ const steps: Step[] = [
     // Needs a saved session; skip cleanly rather than failing the run.
     when: () => existsSync(resolve(OUT, "auth", "state.json")),
   },
+  // Soft: a dirty build should still produce a report saying so, rather than stopping
+  // here. The gate at the end is what turns critical/high findings into a non-zero exit.
+  { name: "pre-deploy scan", argv: ["tsx", "src/deploy-check.ts"], soft: true },
+  { name: "coverage", argv: ["tsx", "src/coverage.ts"], soft: true },
   { name: "report", argv: ["tsx", "src/report.ts"] },
 ];
 
@@ -63,16 +67,19 @@ interface Finding {
 }
 
 function highSeverityCount(): number {
-  const file = resolve(OUT, "findings.jsonl");
-  if (!existsSync(file)) return 0;
   let n = 0;
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const sev = (JSON.parse(line) as Finding).severity;
-      if (sev === "critical" || sev === "high") n++;
-    } catch {
-      // ignore a partial line
+  // Exploration findings and pre-deploy findings both gate the build.
+  for (const name of ["findings.jsonl", "deploy-findings.jsonl"]) {
+    const file = resolve(OUT, name);
+    if (!existsSync(file)) continue;
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const sev = (JSON.parse(line) as Finding).severity;
+        if (sev === "critical" || sev === "high") n++;
+      } catch {
+        // ignore a partial line
+      }
     }
   }
   return n;

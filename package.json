@@ -12,7 +12,9 @@
     "test:unit": "tsx --test src/*.test.ts",
     "email:selftest": "tsx src/email/selftest.ts",
     "email:wait": "tsx src/email/waittest.ts",
-    "export:burp": "tsx src/export-burp.ts"
+    "export:burp": "tsx src/export-burp.ts",
+    "predeploy": "tsx src/deploy-check.ts",
+    "coverage": "tsx src/coverage.ts"
   },
   "type": "module",
   "private": true,
