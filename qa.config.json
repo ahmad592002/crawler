@@ -65,5 +65,19 @@
   "captureHttpHistory": false,
   "captureMaxBodyBytes": 2000000,
   "captureOffOrigin": false,
-  "testWorkers": 2
+  "testWorkers": 2,
+  "personas": [
+    {
+      "id": "alice",
+      "role": "owner",
+      "username": "tomsmith",
+      "password": "SuperSecretPassword!"
+    },
+    {
+      "id": "bob",
+      "role": "member",
+      "username": "tomsmith",
+      "password": "SuperSecretPassword!"
+    }
+  ]
 }

@@ -38,6 +38,24 @@ const ConfigSchema = z.object({
    * bottleneck long before the machine is - too many workers just times each other out.
    */
   testWorkers: z.number().int().positive().optional(),
+  /**
+   * Identities for features that only exist between two people - sharing, invitations,
+   * messaging, admin-over-member. Each gets its own mailbox and its own saved session.
+   */
+  personas: z
+    .array(
+      z.object({
+        /** Stable handle: used in specs, filenames and the report. */
+        id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,20}$/, "id must be lowercase letters, digits or hyphens"),
+        /** What this identity is for, e.g. "owner", "member", "admin". */
+        role: z.string().optional(),
+        /** Fixed site password. Omit to generate one, or for a site with fixed demo logins. */
+        password: z.string().optional(),
+        /** Fixed site username, for targets that log in by username rather than email. */
+        username: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 
 export type QaConfig = z.infer<typeof ConfigSchema>;
@@ -175,3 +193,6 @@ export function isDeniedUrl(url: string, cfg: QaConfig): boolean {
   const words = foldLabel(decoded.replace(/[/_\-+.=&?]+/g, " "));
   return isDenied(words, cfg) || DESTRUCTIVE_ROUTE.test(words);
 }
+
+/** One entry of qa.config.json "personas". */
+export type PersonaConfig = NonNullable<QaConfig["personas"]>[number];

@@ -5,8 +5,10 @@
  * default waitUntil:"load" waits on tracker requests that may hang or fail to resolve,
  * which shows up as a navigation timeout that has nothing to do with the site under test.
  */
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Page, type Browser, type BrowserContext } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { loadConfig, isDenied, isDeniedUrl, isAllowedUrl } from "../src/config.js";
+import { personaById, type Persona } from "../src/personas.js";
 
 const cfg = loadConfig();
 
@@ -43,6 +45,102 @@ export const test = base.extend({
 });
 
 export { expect };
+
+// ------------------------------------------------------------------ multi-user
+
+/**
+ * Apply the same routing and navigation defaults the `page` fixture applies.
+ *
+ * A second persona's page is created by hand rather than by the fixture, so without this
+ * it would wait on third-party subresources the first page never sees - and fail in a way
+ * that looks like the feature is broken.
+ */
+async function harden(page: Page): Promise<void> {
+  if (!cfg.captureOffOrigin) {
+    await page.route(
+      (url) => !isAllowedUrl(url.toString(), cfg),
+      (route) => route.abort(),
+    );
+  }
+  await page.route(/\.(woff2?|ttf|otf|eot|mp4|webm|mp3|avi|mov)(\?|$)/i, (route) => route.abort());
+  const goto = page.goto.bind(page);
+  page.goto = (url, options) => goto(url, { waitUntil: "domcontentloaded", ...options });
+}
+
+export interface UserSession {
+  /** The persona this session belongs to. */
+  persona: Persona;
+  page: Page;
+  context: BrowserContext;
+  /** Close early if a test needs to prove a session ends. Otherwise handled for you. */
+  close(): Promise<void>;
+}
+
+/**
+ * Open a browser session for a named persona, using its own saved login.
+ *
+ * Each persona gets a separate BrowserContext, which is what keeps the two identities
+ * genuinely independent: separate cookies, separate storage, separate service workers.
+ * Two pages in one context would share a session and silently test nothing.
+ */
+export async function openAs(browser: Browser, id: string): Promise<UserSession> {
+  const persona = personaById(id);
+  if (!existsSync(persona.statePath)) {
+    throw new Error(
+      `Persona "${id}" has no saved session at ${persona.statePath}. ` +
+        `Run: npx playwright test --project=setup`,
+    );
+  }
+  const context = await browser.newContext({ storageState: persona.statePath });
+  const page = await context.newPage();
+  await harden(page);
+  return {
+    persona,
+    page,
+    context,
+    close: () => context.close(),
+  };
+}
+
+/**
+ * Two personas in one test, torn down together.
+ *
+ * Use for anything that only exists between people: A shares with B, A invites B, A
+ * messages B, an admin suspends a member. The callback gets both sessions live at once, so
+ * a test can act as A and assert as B without logging in and out.
+ */
+export async function withTwoUsers<T>(
+  browser: Browser,
+  a: string,
+  b: string,
+  fn: (userA: UserSession, userB: UserSession) => Promise<T>,
+): Promise<T> {
+  const [userA, userB] = await Promise.all([openAs(browser, a), openAs(browser, b)]);
+  try {
+    return await fn(userA, userB);
+  } finally {
+    await Promise.allSettled([userA.close(), userB.close()]);
+  }
+}
+
+/**
+ * Open a session with no cookies at all.
+ *
+ * The third identity every permission test needs: "and a stranger cannot see it either".
+ * Forgetting this is how a resource ends up protected from other users but public to the
+ * internet.
+ */
+export async function openAnonymous(browser: Browser): Promise<UserSession> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await harden(page);
+  return {
+    persona: { id: "anonymous", role: "signed out", email: "", password: "", statePath: "", createdAt: "" },
+    page,
+    context,
+    close: () => context.close(),
+  };
+}
 
 /**
  * Click something that submits a form, and resolve once the server has answered.

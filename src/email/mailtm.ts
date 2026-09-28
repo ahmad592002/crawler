@@ -143,7 +143,21 @@ export const mailtmProvider: EmailProvider = {
 
   async createInbox(tag) {
     const account = await createAccount(tag);
-    return { address: account.address, token: account.token };
+    // The password goes back to the caller so a persona can persist it and re-open this
+    // same mailbox tomorrow. It is never logged, and never returned through the MCP tool.
+    return { address: account.address, token: account.token, secret: account.password };
+  },
+
+  async restoreInbox(address, secret) {
+    const key = address.toLowerCase();
+    const known = accounts.get(key);
+    if (known) return { address: known.address, token: known.token, secret: known.password };
+
+    // Minting a token is also the check that the mailbox still exists: mail.tm expires
+    // idle accounts, and a 401 here means this persona needs a fresh inbox.
+    const token = await mintToken(address, secret);
+    accounts.set(key, { address, password: secret, token });
+    return { address, token, secret };
   },
 
   async waitForEmail(opts: WaitForEmailOptions): Promise<FoundEmail> {
