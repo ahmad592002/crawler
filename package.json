@@ -14,7 +14,8 @@
     "email:wait": "tsx src/email/waittest.ts",
     "export:burp": "tsx src/export-burp.ts",
     "predeploy": "tsx src/deploy-check.ts",
-    "coverage": "tsx src/coverage.ts"
+    "coverage": "tsx src/coverage.ts",
+    "authz": "tsx src/authz-check.ts"
   },
   "type": "module",
   "private": true,

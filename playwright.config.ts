@@ -18,7 +18,7 @@ export default defineConfig({
     ["json", { outputFile: "output/pw-results.json" }],
   ],
   outputDir: "output/test-results",
-  timeout: 120_000,
+  timeout: 240_000,
   // This target regularly needs ~8s to navigate; the 5s default fires mid-navigation.
   expect: { timeout: 15_000 },
   use: {

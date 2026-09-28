@@ -8,6 +8,7 @@ The root [`README.md`](../README.md) is the quick start. These pages are the ref
 | [configuration.md](configuration.md) | You are pointing this at a new site, or a knob is not doing what you expected. |
 | [safety.md](safety.md) | **Before you run this against anything you care about.** What the guardrails cover, what they provably do not, and the threat model. |
 | [data-formats.md](data-formats.md) | You are reading `output/*.jsonl` by hand, or writing a tool that consumes it. |
+| [multi-user.md](multi-user.md) | You are testing something that needs two people, or checking one user cannot read another's data. |
 | [email.md](email.md) | You are testing a signup or verification flow. |
 | [burp-export.md](burp-export.md) | You want the HTTP capture in Burp/ZAP, or you are checking the export against a real one. |
 | [ci.md](ci.md) | You are wiring this into a pipeline. Read the artifact section in particular. |

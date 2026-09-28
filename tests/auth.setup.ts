@@ -26,8 +26,12 @@ setup("log in and save session", async ({ page }) => {
 
   // Wait for the navigation the click starts before asserting on content. Otherwise the
   // assertion polls the old page and can exhaust its own timeout while the new one loads.
-  await page.waitForURL(/\/secure$/);
-  await expect(page.getByText("You logged into a secure area!")).toBeVisible();
+  //
+  // The setup project gates every other spec, so a single slow response here reports as
+  // "27 tests did not run" and looks like a broken suite. Give the login its own generous
+  // budget rather than inheriting the default and failing the whole run over one timeout.
+  await page.waitForURL(/\/secure$/, { timeout: 180_000 });
+  await expect(page.getByText("You logged into a secure area!")).toBeVisible({ timeout: 30_000 });
 
   await page.context().storageState({ path: STATE });
 });

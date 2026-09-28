@@ -189,3 +189,64 @@ test in `src/guards.test.ts` (17 tests, offline, wired into CI as `npm run test:
 - The Playwright suite could not be run during remediation: the demo target
   (`the-internet.herokuapp.com`) was unresolvable. Specs are typechecked and the guards
   are verified against a local page; the suite needs one green run when the host returns.
+
+## Multi-user testing and the authorization scan
+
+Added after the deploy-readiness work, to cover the bug class a single session cannot
+reach at all.
+
+### Personas
+
+Durable test identities. Each has a stable mailbox, a site password and its own saved
+browser session (`output/auth/state.<id>.json`), declared in `qa.config.json`:
+
+```json
+"personas": [
+  { "id": "alice", "role": "owner" },
+  { "id": "bob",   "role": "member" }
+]
+```
+
+Identities persist in `output/auth/personas.json` and are reused across runs. That is not
+an optimisation: if the address changed every run, an invitation sent yesterday would
+arrive at a mailbox nobody reads, and "accept the invitation" could never be tested end to
+end. The store self-discards when `baseUrl` or the email provider changes.
+
+**This required fixing a real limitation.** A mail.tm mailbox previously died with the
+process that created it — the password only ever lived in memory — so a persona could have
+received exactly one email, ever. `createInbox()` now returns the mailbox secret and
+`restoreInbox()` reopens it.
+
+### Fixtures
+
+`openAs()`, `withTwoUsers()` and `openAnonymous()` in `tests/fixtures.ts`. Each persona
+gets its own `BrowserContext`, not merely its own page — two pages in one context share a
+cookie jar, and the test would pass while proving nothing. `two-user.spec.ts` asserts the
+two session cookies actually differ, which is the guard against that.
+
+`openAnonymous()` covers the third identity every permission test needs. Protected from
+other users but public to the internet is a real and common bug.
+
+### Authorization scan — `npm run authz`
+
+Re-requests every page the authenticated crawl reached, with no cookies and as the other
+persona. A protected page answering a signed-out request is `critical`; the same page
+coming back for a different user is `high`. GET only; deny-listed URLs are skipped.
+
+Two guards exist because both failures happened while building it:
+
+- **It will not report a clean result it did not earn.** Above 25% request failures it
+  exits `SCAN INCONCLUSIVE`. DNS went down mid-development, every probe failed, and the
+  scan reported "No cross-user access problems found" for a run that never reached the
+  site once. Silence must never read as safety.
+- **It detects two personas that are secretly one account.** Comparing session cookies is
+  not sufficient — one account logged in twice yields two different cookies — so the check
+  is on the configured `username`. Without it the demo target produced a page of confident
+  false positives: every "bob can reach alice's page" true, and all of them worthless.
+
+### Also
+
+- `auth.setup.ts` login given a 180s budget and the per-test timeout raised to 240s. The
+  setup project gates every other spec, so one slow response reported as "27 tests did not
+  run" and looked like a broken suite.
+- Unit tests: 48, up from 38.

@@ -196,6 +196,7 @@ function main(): void {
   const findings = [
     ...readJsonl<Finding>("findings.jsonl"),
     ...readJsonl<Finding>("deploy-findings.jsonl"),
+    ...readJsonl<Finding>("authz-findings.jsonl"),
   ].map((f) => ({
     ...f,
     // An unrecognised severity used to match no bucket, so the finding silently vanished

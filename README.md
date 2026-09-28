@@ -50,6 +50,7 @@ see [docs/email.md](docs/email.md) if your site rejects disposable domains.
 | `npm test` | Playwright suite |
 | `npm run test:unit` | Offline regression tests — no browser, no network |
 | `npm run predeploy` | Pre-deploy hygiene scan — what you forgot to remove |
+| `npm run authz` | Cross-user authorization scan — IDOR and signed-out access |
 | `npm run coverage` | What the crawl found that nothing tests |
 | `npm run report` | Build `output/report.html` |
 | `npm run export:burp` | Rebuild `output/http-history.xml` from the capture |
@@ -88,6 +89,7 @@ correctly — the day someone fixes it. Nothing to remember to re-enable.
 | [docs/configuration.md](docs/configuration.md) | Pointing at a new site, or a knob isn't behaving |
 | [docs/safety.md](docs/safety.md) | **Before running against anything you care about** |
 | [docs/data-formats.md](docs/data-formats.md) | Reading `output/*.jsonl` or writing a consumer |
+| [docs/multi-user.md](docs/multi-user.md) | Two-user features, personas, and the authorization scan |
 | [docs/email.md](docs/email.md) | Testing a signup or verification flow |
 | [docs/burp-export.md](docs/burp-export.md) | Loading the HTTP capture into Burp or ZAP |
 | [docs/ci.md](docs/ci.md) | Wiring this into a pipeline — read the artifact section |

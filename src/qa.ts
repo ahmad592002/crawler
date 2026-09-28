@@ -42,6 +42,13 @@ const steps: Step[] = [
   },
   // Soft: a dirty build should still produce a report saying so, rather than stopping
   // here. The gate at the end is what turns critical/high findings into a non-zero exit.
+  {
+    name: "authorization scan",
+    argv: ["tsx", "src/authz-check.ts"],
+    soft: true,
+    // Needs the authenticated crawl above to have produced something to probe.
+    when: () => existsSync(resolve(OUT, "pages.auth.jsonl")),
+  },
   { name: "pre-deploy scan", argv: ["tsx", "src/deploy-check.ts"], soft: true },
   { name: "coverage", argv: ["tsx", "src/coverage.ts"], soft: true },
   { name: "report", argv: ["tsx", "src/report.ts"] },
@@ -69,7 +76,7 @@ interface Finding {
 function highSeverityCount(): number {
   let n = 0;
   // Exploration findings and pre-deploy findings both gate the build.
-  for (const name of ["findings.jsonl", "deploy-findings.jsonl"]) {
+  for (const name of ["findings.jsonl", "deploy-findings.jsonl", "authz-findings.jsonl"]) {
     const file = resolve(OUT, name);
     if (!existsSync(file)) continue;
     for (const line of readFileSync(file, "utf8").split("\n")) {
