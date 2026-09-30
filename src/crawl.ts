@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
 import { recordHistory, writeBurpXml, drainHistory, HISTORY_JSONL } from "./http-history.js";
+import { acquireLock } from "./runlock.js";
 
 const OUT = resolve(ROOT, "output");
 const SHOTS = resolve(OUT, "screenshots");
@@ -523,6 +524,10 @@ async function main(): Promise<void> {
     throw new Error("Set baseUrl and allowedOrigins in qa.config.json first.");
   }
 
+  // Exclusive for the whole crawl: two crawlers appending to one .jsonl interleave their
+  // writes and corrupt the inventory with no error anywhere.
+  const releaseLock = acquireLock(`crawl-${mode}`, mode);
+
   mkdirSync(SHOTS, { recursive: true });
   const outFile = resolve(OUT, mode === "auth" ? "pages.auth.jsonl" : "pages.jsonl");
 
@@ -761,6 +766,10 @@ async function main(): Promise<void> {
     const n = writeBurpXml();
     console.log(`wrote output/http-history.xml (${n} exchanges, Burp proxy-history format)`);
   }
+
+  // Released here and also on exit/SIGINT, so a crash cannot leave a lock that blocks
+  // every future run.
+  releaseLock();
 }
 
 // Only crawl when this file is the entry point. Without the guard, importing
