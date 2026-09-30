@@ -40,6 +40,8 @@ export interface Probe {
   length: number;
   /** True when the body looks like a sign-in page rather than the resource. */
   looksLikeLogin: boolean;
+  /** False for an empty SPA shell or a stub - a 200 that proves nothing. */
+  hasContent: boolean;
 }
 
 /**
@@ -59,18 +61,52 @@ export interface Probe {
  */
 export function looksLikeLoginPage(body: string): boolean {
   const head = body.slice(0, 60_000);
+
+  // ---- 1. An explicit "you are not allowed in" interstitial. -------------------------
+  // Checked FIRST and with no other precondition. Gating this behind a password input made
+  // it dead code, and it is the single most common shape an expired session produces: a
+  // sentence, a link, and no form at all. Missing it meant every page on the site compared
+  // equal for the owner and a stranger, which FABRICATED critical findings.
+  if (/you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head)) return true;
+  if (/(?:please\s+)?(?:log\s?in|sign\s?in) to (?:view|continue|access)/i.test(head)) return true;
+  if (/your session has (?:expired|timed out)|session expired/i.test(head)) return true;
+
+  // ---- 2. Signals that this is a real application page, not a gate. ------------------
+  // Evaluated before the positive form checks, because a settings page, a signup page and
+  // an admin create-user form all carry an identifier field and a password field, and
+  // suppressing those is how the previous version lost the scanner's best findings.
+  const hasLogout = /(?:sign|log)\s?out\b|href=["'][^"']*logout/i.test(head);
+  const isSignup = /(?:create|register)\s+(?:your\s+)?(?:an?\s+)?account|sign\s?up\b|already have an account/i.test(head);
+  const isSettings = /account settings|change (?:your )?password|current password|new password|profile settings/i.test(head);
+  const isAdminForm = /\b(?:new|create|add|edit)\s+(?:user|member|account|admin)\b|name=["']?role/i.test(head);
+  if (hasLogout || isSignup || isSettings || isAdminForm) return false;
+
+  // ---- 3. A sign-in form, in any of its shapes. --------------------------------------
   const hasPasswordInput = /<input[^>]+type=["']?password/i.test(head);
-  if (!hasPasswordInput) return false;
+  // Identifier vocabulary covers non-English and framework conventions. j_username is
+  // Spring Security; benutzer/utilisateur/usuario cover the common localisations.
+  const hasIdentifier =
+    /<input[^>]+(?:name|id)=["']?(?:j_)?(?:user(?:name|id)?|email|e?mail|login|account|benutzer|utilisateur|usuario|correo)/i.test(head);
+  const saysSignIn =
+    /(?:sign\s?in|log\s?in|log\s?on|sign\s?on|anmelden|connexion|iniciar sesi)/i.test(head);
 
-  const hasIdentifier = /<input[^>]+(?:name|id)=["']?(?:user(?:name)?|email|login|account)/i.test(head);
-  const saysSignIn = /(?:please\s+)?(?:sign\s?in|log\s?in|sign\s?on)\b/i.test(head);
-  const mustAuthenticate = /you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head);
+  // Password + identifier is a login form regardless of page size. The old `short` gate
+  // meant a branded enterprise login page over 12 KB was treated as a resource.
+  if (hasPasswordInput && hasIdentifier) return true;
 
-  // A short page with a password field and an identifier field is a sign-in page. A long
-  // application page containing a password field somewhere is not.
-  const short = head.length < 12_000;
+  // Passwordless: magic-link and SSO-only pages have no password field at all. Require a
+  // sign-in phrase AND a passwordless affordance, so an ordinary page that merely says
+  // "log in" in a nav link does not qualify.
+  const passwordless =
+    /magic link|email me a link|(?:login|sign-?in) link|one-?time (?:code|password|link)|continue with (?:google|github|apple|microsoft|sso)|single sign-?on|\bsso\b/i.test(
+      head,
+    );
+  if (saysSignIn && passwordless) return true;
 
-  return mustAuthenticate || (hasPasswordInput && hasIdentifier && (saysSignIn || short));
+  // A password field with no identifier at all (a PIN or lock screen) on a small page.
+  if (hasPasswordInput && head.length < 8_000) return true;
+
+  return false;
 }
 
 export function classify(status: number, body: string): Probe {
@@ -78,6 +114,7 @@ export function classify(status: number, body: string): Probe {
     status,
     length: body.length,
     looksLikeLogin: looksLikeLoginPage(body),
+    hasContent: visibleTextLength(body) >= MIN_CONTENT_CHARS,
   };
 }
 
@@ -88,8 +125,28 @@ export function classify(status: number, body: string): Probe {
  * an SPA shell answers 200 for everything. Both are "denied" for our purposes.
  */
 export function reachedResource(p: Probe): boolean {
-  return p.status >= 200 && p.status < 300 && !p.looksLikeLogin;
+  if (p.status < 200 || p.status >= 300) return false;
+  if (p.looksLikeLogin) return false;
+  // An un-hydrated SPA shell answers 200 with no content for every URL, authorised or not,
+  // so it is evidence of nothing. Treating it as "reached" made every page compare equal
+  // for the owner and a stranger and fabricated critical findings. This is the case the
+  // docstring above has always claimed to cover.
+  return p.hasContent;
 }
+
+/** Visible text, tags and scripts removed. Used to tell a real page from an empty shell. */
+export function visibleTextLength(body: string): number {
+  return body
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim().length;
+}
+
+/** Below this, a 200 is a shell or a stub rather than a page someone could read. */
+const MIN_CONTENT_CHARS = 40;
 
 /**
  * Compare two successful responses. Near-identical length means the second identity got

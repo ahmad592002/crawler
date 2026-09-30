@@ -74,9 +74,68 @@ function readJsonl<T>(name: string): T[] {
  * as coverage. A metric that credits an unwritten test is worse than no metric.
  */
 export function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1 ");
+  // A regex-based strip is not safe here. A `/*` inside a string literal pairs with the
+  // next real `*/` and silently deletes everything between - which deletes coverage
+  // EVIDENCE, so the metric under-reports and hides real gaps behind noise. This walks the
+  // source tracking whether it is inside a string, so comment markers in data are data.
+  let out = "";
+  let i = 0;
+  type Mode = "code" | "'" | '"' | "`" | "//" | "/*";
+  let mode: Mode = "code";
+
+  while (i < src.length) {
+    const c = src[i]!;
+    const next = src[i + 1];
+
+    if (mode === "code") {
+      if (c === "/" && next === "/") {
+        mode = "//";
+        i += 2;
+        continue;
+      }
+      if (c === "/" && next === "*") {
+        mode = "/*";
+        i += 2;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === "`") mode = c;
+      out += c;
+      i++;
+      continue;
+    }
+
+    if (mode === "//") {
+      if (c === "\n") {
+        mode = "code";
+        out += c;
+      }
+      i++;
+      continue;
+    }
+
+    if (mode === "/*") {
+      if (c === "*" && next === "/") {
+        mode = "code";
+        out += " ";
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    // Inside a string literal: copy verbatim, honour escapes, close on the same quote.
+    out += c;
+    if (c === "\\") {
+      if (next !== undefined) out += next;
+      i += 2;
+      continue;
+    }
+    if (c === mode) mode = "code";
+    i++;
+  }
+
+  return out;
 }
 
 function specHaystack(): { text: string; files: string[] } {
@@ -99,13 +158,25 @@ function specHaystack(): { text: string; files: string[] } {
  */
 export function visitsPath(haystack: string, path: string): boolean {
   if (path.length <= 1) return false;
-  const p = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // The path must end at the quote, a query, a hash, or a trailing slash - not run on
-  // into a longer path.
-  // The path must END at the closing quote, an optional trailing slash, or a query/hash
-  // whose remainder runs to the quote. Demanding a quote immediately after ? or # rejected
-  // the perfectly ordinary `page.goto("/upload?x=1")`.
-  return new RegExp(`["'\`]${p}(?:/?["'\`]|[?#][^"'\`]*["'\`])`).test(haystack);
+
+  // Collapse an :id / :uuid segment so a template matches an interpolated navigation:
+  // goto(`/users/${id}/invoice`) is a visit to /users/:id/invoice.
+  const p = path
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/:id|:uuid|:hash/g, "[^/\"'`]+");
+
+  // Where the path may END: a closing quote, a trailing slash, a query/hash, or - inside a
+  // template literal - an interpolation.
+  const ends = `(?:/?["'\\\`]|[?#][^"'\\\`]*["'\\\`]|\\$\\{)`;
+
+  // Requiring a NAVIGATION context is what separates a visit from a mention. Anchoring on
+  // a quote alone credited `expect(text).toBe("/upload")` and bare array membership, while
+  // rejecting goto(`${baseURL}/upload`) and every absolute URL - wrong in both directions.
+  const nav = new RegExp(
+    `(?:goto|tohaveurl|waitforurl|href\\s*=|request\\.(?:get|post|fetch))[^;\\n]{0,100}?${p}${ends}`,
+    "i",
+  );
+  return nav.test(haystack);
 }
 
 /** The path part, which is what a spec realistically contains. */

@@ -6,7 +6,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { acquireLock, readLock, LockHeldError } from "./runlock.js";
 import { ROOT } from "./config.js";
@@ -80,7 +81,7 @@ test("a lock from a dead process is cleared, not obeyed forever", () => {
       pid: 999999,
       mode: "anon",
       startedAt: new Date().toISOString(),
-      host: process.env["COMPUTERNAME"] || process.env["HOSTNAME"] || "local",
+      host: hostname(),
     }),
   );
 
@@ -102,7 +103,7 @@ test("a lock older than the stale window is cleared even if the pid looks alive"
       pid: process.pid,
       mode: "anon",
       startedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-      host: "old",
+      host: hostname(),
     }),
   );
 
@@ -217,4 +218,89 @@ test("the lock written is complete, not an empty file", () => {
   } finally {
     release();
   }
+});
+
+// ------------------------------------------------- audit round 3 regressions
+
+test("an unreadable lock ages out instead of blocking forever", () => {
+  // Round 1 made an empty lock instantly stale (stealable). Round 2 over-corrected to a
+  // timestamp recomputed on every read, so age was always ~0 and the lock was IMMORTAL -
+  // one truncated byte meant the crawler refused forever. mtime is the honest age.
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(FILE, "");
+
+  // Held while fresh.
+  assert.throws(() => acquireLock(NAME, "anon"), LockHeldError);
+
+  // Backdate the file past the stale window; it must now be retired.
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  utimesSync(FILE, old, old);
+  const release = acquireLock(NAME, "anon");
+  try {
+    assert.equal(readLock(NAME)?.pid, process.pid, "stale unreadable lock was not retired");
+  } finally {
+    release();
+    clean();
+  }
+});
+
+test("readLock reports a STABLE age for an unreadable lock", () => {
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(FILE, "not json");
+  try {
+    const a = readLock(NAME)?.startedAt;
+    const b = readLock(NAME)?.startedAt;
+    assert.equal(a, b, "age is recomputed per read, so the lock can never go stale");
+  } finally {
+    clean();
+  }
+});
+
+test("an owner CAN release its own lock after the file is truncated under it", () => {
+  // Otherwise the owner leaves an unreadable lock behind, which is then immortal.
+  clean();
+  const release = acquireLock(NAME, "anon");
+  writeFileSync(FILE, "");
+  release();
+  assert.equal(existsSync(FILE), false, "owner could not clear its own corrupted lock");
+});
+
+test("retiring a lock that changed under us does not steal it", () => {
+  // Two processes both decide a lock is stale; the first retires it and acquires. The
+  // second's retire must NOT move the first's live lock aside - that produced two holders.
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  writeFileSync(
+    FILE,
+    JSON.stringify({ pid: 999999, mode: "anon", startedAt: old.toISOString(), host: hostname() }),
+  );
+
+  // P1 takes it legitimately.
+  const release = acquireLock(NAME, "anon");
+  try {
+    // P2 now decides based on the OLD info it had already read. Simulated by asking again:
+    // the live lock is fresh and ours, so it must be refused, not retired.
+    assert.throws(() => acquireLock(NAME, "auth"), LockHeldError);
+    assert.equal(readLock(NAME)?.pid, process.pid, "a live lock was retired out from under us");
+  } finally {
+    release();
+    clean();
+  }
+});
+
+test("retiring leaves no litter behind", () => {
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  writeFileSync(
+    FILE,
+    JSON.stringify({ pid: 999999, mode: "anon", startedAt: old.toISOString(), host: hostname() }),
+  );
+  acquireLock(NAME, "anon")();
+
+  const litter = readdirSync(OUT).filter((f) => f.startsWith(NAME) && /retir/.test(f));
+  assert.deepEqual(litter, [], `retire left files behind: ${litter.join(", ")}`);
 });
