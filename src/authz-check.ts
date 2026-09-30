@@ -42,14 +42,42 @@ export interface Probe {
   looksLikeLogin: boolean;
 }
 
-const LOGIN_MARKERS =
-  /(type=["']?password|name=["']?password|sign\s?in|log\s?in|<form[^>]+login|you must login)/i;
+/**
+ * Does this body look like a sign-in page, as opposed to a page that merely LINKS to one?
+ *
+ * The first version matched `log ?in` and `name=password` anywhere in the first 40 KB. A
+ * protected invoice page with `<a href="/login">Login</a>` in its footer therefore read as
+ * a login page, `reachedResource` returned false, and the whole template was dropped from
+ * the scan before either check ran - after which the run printed "No cross-user access
+ * problems found". Nearly every authenticated page has a login or logout link somewhere,
+ * so that suppressed most of the site and reported it as clean.
+ *
+ * The signal has to be a password INPUT, which a link cannot produce. A page offering a
+ * change-password field is still a real resource, so a lone password input is not enough
+ * either: it must sit in a form that also takes an identifier, and the page must be small
+ * enough to plausibly BE a sign-in page rather than an application screen containing one.
+ */
+export function looksLikeLoginPage(body: string): boolean {
+  const head = body.slice(0, 60_000);
+  const hasPasswordInput = /<input[^>]+type=["']?password/i.test(head);
+  if (!hasPasswordInput) return false;
+
+  const hasIdentifier = /<input[^>]+(?:name|id)=["']?(?:user(?:name)?|email|login|account)/i.test(head);
+  const saysSignIn = /(?:please\s+)?(?:sign\s?in|log\s?in|sign\s?on)\b/i.test(head);
+  const mustAuthenticate = /you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head);
+
+  // A short page with a password field and an identifier field is a sign-in page. A long
+  // application page containing a password field somewhere is not.
+  const short = head.length < 12_000;
+
+  return mustAuthenticate || (hasPasswordInput && hasIdentifier && (saysSignIn || short));
+}
 
 export function classify(status: number, body: string): Probe {
   return {
     status,
     length: body.length,
-    looksLikeLogin: LOGIN_MARKERS.test(body.slice(0, 40_000)),
+    looksLikeLogin: looksLikeLoginPage(body),
   };
 }
 
@@ -199,6 +227,11 @@ async function main(): Promise<void> {
   let n = 0;
   const owner = sessions[0];
 
+  // Suppression must be visible. A template skipped because its baseline was unreachable,
+  // or because it was classified as a login page, is a template that was NOT checked - and
+  // printing only "no problems found" made those indistinguishable from a clean result.
+  const ledger = { compared: 0, baselineUnreachable: 0, classifiedLogin: 0 };
+
   // A probe that throws returns null and is skipped. Counting those is not bookkeeping:
   // with DNS down, every probe failed and this scan printed "No cross-user access problems
   // found" - a clean bill of health for a scan that never reached the site once.
@@ -218,6 +251,16 @@ async function main(): Promise<void> {
       if (anonProbe === null) unreachable++;
 
       const ownerReached = base ? reachedResource(base) : false;
+
+      // Record WHY a template is about to be skipped, so suppression shows up in the
+      // summary instead of masquerading as a clean result.
+      if (!ownerReached) {
+        if (base === null) ledger.baselineUnreachable++;
+        else if (base.looksLikeLogin) ledger.classifiedLogin++;
+        else ledger.baselineUnreachable++;
+      } else {
+        ledger.compared++;
+      }
 
       // 1. Signed out, but the page came back anyway.
       if (anonProbe && reachedResource(anonProbe) && ownerReached && sameResource(base!, anonProbe)) {
@@ -243,7 +286,15 @@ async function main(): Promise<void> {
       if (!ownerReached || sessions.length < 2 || !compareUsers) continue;
       for (const other of sessions.slice(1)) {
         const p = await probe(other.ctx, url, timeoutMs);
-        if (!p) continue;
+        // Counted here too. Leaving the cross-user loop out of the tally meant that if every
+        // single IDOR probe timed out, failRate stayed at whatever the base/anon pair
+        // produced - so the guard against a false clean bill did not fire on the half of
+        // the scan that actually finds IDOR.
+        attempted++;
+        if (!p) {
+          unreachable++;
+          continue;
+        }
         if (sameResource(base!, p)) {
           findings.push({
             id: `Z-${String(++n).padStart(2, "0")}`,
@@ -285,6 +336,28 @@ async function main(): Promise<void> {
   }
   if (unreachable > 0) {
     console.log(`  note: ${unreachable} of ${attempted} requests failed and were skipped.`);
+  }
+
+  // The ledger goes out before the verdict, because "clean" over 3 compared templates out
+  // of 48 is not the same statement as "clean" over 48.
+  console.log(
+    `templates compared: ${ledger.compared} of ${targets.length}` +
+      `   skipped: ${ledger.baselineUnreachable} baseline unreachable, ` +
+      `${ledger.classifiedLogin} classified as a login page`,
+  );
+  if (ledger.compared === 0) {
+    console.error(
+      `\nSCAN INCONCLUSIVE - not a single template was actually compared.\n` +
+        `  Every candidate was unreachable or classified as a login page, so this run\n` +
+        `  proves nothing about authorization. Check the session is still valid.`,
+    );
+    process.exit(2);
+  }
+  if (ledger.compared < targets.length / 2) {
+    console.log(
+      `  WARNING: fewer than half the templates were compared. Treat the result below as\n` +
+        `  partial, not as a clean bill of health.`,
+    );
   }
 
   if (findings.length === 0) {

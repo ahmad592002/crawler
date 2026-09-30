@@ -79,14 +79,14 @@ test.describe("key presses", () => {
     ["Tab", "You entered: TAB"],
   ] as const) {
     test(`reports ${key}`, async ({ page }) => {
-      await page.getByRole("textbox").press(key);
+      await page.locator("input#target").press(key);
       await expect(page.locator("#result")).toHaveText(expected);
     });
   }
 
   // F-002: Enter is the one key the handler does not report.
   test.fail("reports Enter", async ({ page }) => {
-    await page.getByRole("textbox").press("Enter");
+    await page.locator("input#target").press("Enter");
     await expect(page.locator("#result")).toHaveText("You entered: ENTER");
   });
 });

@@ -170,14 +170,6 @@ test("a 404 page is not counted as an untested page", () => {
   assert.equal(cov.templates.covered, 1);
 });
 
-test("a 500 page is excluded from the denominator too", () => {
-  const cov = computeCoverage(
-    [page({ url: "https://t.test/boom", template: "https://t.test/boom", status: 500 })],
-    noFeatures,
-    specs(""),
-  );
-  assert.equal(cov.templates.total, 0);
-});
 
 test("an anonymous form is credited when a spec visits its page", () => {
   // No action and no named fields: there is nothing else to match on, so refusing to
@@ -229,4 +221,75 @@ test("a NAMED form is not credited just because the page is visited", () => {
     specs(`await page.goto("/signup")`),
   );
   assert.equal(cov.forms.covered, 0);
+});
+
+// ------------------------------------------------- audit round 1 regressions
+
+test("a path named only in a COMMENT is not coverage", () => {
+  const cov = computeCoverage(
+    [
+      page({
+        url: "https://t.test/checkboxes",
+        template: "https://t.test/checkboxes",
+        forms: [{ action: "", method: "get", destructive: false,
+          fields: [{ name: "", type: "checkbox", label: "", required: false }] }],
+      }),
+    ],
+    noFeatures,
+    { text: "// todo: write a test for /checkboxes one day", files: ["x.spec.ts"] },
+  );
+  assert.equal(cov.templates.covered, 0, "credited a commented-out intention");
+  assert.equal(cov.forms.covered, 0, "an unwritten test laundered into forms.covered");
+});
+
+test("a longer path does not credit the shorter path it contains", () => {
+  // A spec visiting /notification_message_rendered credited /notification_message for free.
+  const cov = computeCoverage(
+    [
+      page({ url: "https://t.test/notification_message", template: "https://t.test/notification_message" }),
+      page({ url: "https://t.test/notification_message_rendered", template: "https://t.test/notification_message_rendered" }),
+    ],
+    noFeatures,
+    specs(`await page.goto("/notification_message_rendered")`),
+  );
+  assert.equal(cov.templates.total, 2);
+  assert.equal(cov.templates.covered, 1, "prefix bleed: the shorter path was credited");
+});
+
+test("a 5xx page is COUNTED, not excluded", () => {
+  // Excluding it let a site erroring under load raise its own coverage score, and dropped
+  // the very page F-010 (/upload returns 500) was found on.
+  const cov = computeCoverage(
+    [page({ url: "https://t.test/upload", template: "https://t.test/upload", status: 500 })],
+    noFeatures,
+    specs(""),
+  );
+  assert.equal(cov.templates.total, 1);
+  assert.equal(cov.templates.covered, 0);
+});
+
+test("410 Gone is excluded like 404", () => {
+  const cov = computeCoverage(
+    [page({ url: "https://t.test/old", template: "https://t.test/old", status: 410 })],
+    noFeatures,
+    specs(""),
+  );
+  assert.equal(cov.templates.total, 0);
+});
+
+test("a real navigation still counts", () => {
+  for (const src of [
+    `await page.goto("/upload")`,
+    `page.goto('/upload')`,
+    `await expect(page).toHaveURL("/upload")`,
+    `href="/upload"`,
+    `await page.goto("/upload?x=1")`,
+  ]) {
+    const cov = computeCoverage(
+      [page({ url: "https://t.test/upload", template: "https://t.test/upload" })],
+      noFeatures,
+      specs(src),
+    );
+    assert.equal(cov.templates.covered, 1, `not credited for: ${src}`);
+  }
 });

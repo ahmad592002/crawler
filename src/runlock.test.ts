@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { acquireLock, readLock, LockHeldError } from "./runlock.js";
 import { ROOT } from "./config.js";
@@ -73,9 +73,15 @@ test("a lock from a dead process is cleared, not obeyed forever", () => {
   clean();
   mkdirSync(OUT, { recursive: true });
   // PID 999999 is above the default Linux pid_max and not a live Windows process.
+    // Same host, so the pid is trusted and its absence means dead.
   writeFileSync(
     FILE,
-    JSON.stringify({ pid: 999999, mode: "anon", startedAt: new Date().toISOString(), host: "gone" }),
+    JSON.stringify({
+      pid: 999999,
+      mode: "anon",
+      startedAt: new Date().toISOString(),
+      host: process.env["COMPUTERNAME"] || process.env["HOSTNAME"] || "local",
+    }),
   );
 
   const release = acquireLock(NAME, "anon");
@@ -108,19 +114,6 @@ test("a lock older than the stale window is cleared even if the pid looks alive"
   }
 });
 
-test("a corrupt lock file is treated as held, not ignored", () => {
-  clean();
-  mkdirSync(OUT, { recursive: true });
-  writeFileSync(FILE, "{ this is not json");
-  try {
-    // pid -1 never looks alive, so it is cleared - but readLock must not throw first.
-    const info = readLock(NAME);
-    assert.equal(info?.pid, -1);
-    acquireLock(NAME, "anon")();
-  } finally {
-    clean();
-  }
-});
 
 test("holding a lock does not keep the process alive after release", () => {
   // Regression: handlers were attached per-acquire, and a signal listener keeps the Node
@@ -149,4 +142,79 @@ test("many acquire/release cycles do not accumulate listeners", () => {
   const before = process.listenerCount("SIGINT");
   for (let i = 0; i < 20; i++) acquireLock(NAME, "anon")();
   assert.equal(process.listenerCount("SIGINT"), before);
+});
+
+// ------------------------------------------------- audit round 1 regressions
+
+test("an EMPTY lock file reads as held, not as stale", () => {
+  // A process that died between creating the file and writing to it left an empty lock.
+  // readLock used to return startedAt=epoch, which the age check saw as 29 million minutes
+  // old and cleared - so the lock was silently stolen and two crawls ran.
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(FILE, "");
+  try {
+    assert.throws(() => acquireLock(NAME, "anon"), LockHeldError);
+  } finally {
+    clean();
+  }
+});
+
+test("a corrupt lock file reads as held", () => {
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(FILE, "{ this is not json");
+  try {
+    assert.throws(() => acquireLock(NAME, "anon"), LockHeldError);
+  } finally {
+    clean();
+  }
+});
+
+test("release does not delete a lock that is no longer ours", () => {
+  // After our lock is retired, whatever replaced it belongs to someone else. Removing by
+  // path unlocked a live crawl and cascaded to the next one.
+  clean();
+  const release = acquireLock(NAME, "anon");
+  writeFileSync(
+    FILE,
+    JSON.stringify({ pid: 424242, mode: "auth", startedAt: new Date().toISOString(), host: "other" }),
+  );
+  release();
+  try {
+    assert.equal(existsSync(FILE), true, "release deleted someone else's lock");
+    assert.equal(readLock(NAME)?.pid, 424242);
+  } finally {
+    clean();
+  }
+});
+
+test("a lock from another host is never judged dead by pid", () => {
+  // output/ can live in a synced folder; pid 1234 elsewhere says nothing about pid 1234
+  // here. Only the age window may retire a foreign lock.
+  clean();
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(
+    FILE,
+    JSON.stringify({ pid: 999999, mode: "anon", startedAt: new Date().toISOString(), host: "some-other-machine" }),
+  );
+  try {
+    assert.throws(() => acquireLock(NAME, "anon"), LockHeldError);
+  } finally {
+    clean();
+  }
+});
+
+test("the lock written is complete, not an empty file", () => {
+  clean();
+  const release = acquireLock(NAME, "anon");
+  try {
+    const raw = readFileSync(FILE, "utf8");
+    assert.ok(raw.trim().length > 0, "lock file is empty");
+    const parsed = JSON.parse(raw);
+    assert.equal(parsed.pid, process.pid);
+    assert.ok(parsed.host);
+  } finally {
+    release();
+  }
 });

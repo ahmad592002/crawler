@@ -11,7 +11,10 @@ import { classify, reachedResource, sameResource, sharedIdentity } from "./authz
 import type { QaConfig } from "./config.js";
 import type { Persona } from "./personas.js";
 
-const LOGIN_PAGE = `<form action="/login"><input name="password" type="password"></form>`;
+// A realistic sign-in page: an identifier field AND a password field, and little else.
+const LOGIN_PAGE = `<html><body><h1>Sign in</h1><form action="/login">
+<input name="username" type="text"><input name="password" type="password">
+<button>Sign in</button></form></body></html>`;
 const RESOURCE = `<h1>Invoice 4021</h1><p>${"x".repeat(2000)}</p>`;
 
 test("a 200 that renders a login form has NOT reached the resource", () => {

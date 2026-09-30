@@ -16,7 +16,7 @@
  * and, if the duplicates ever recur while a lock is held, it rules the theory out - which
  * is worth as much.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, openSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT } from "./config.js";
 
@@ -31,6 +31,11 @@ export interface LockInfo {
 
 /** A lock older than this is assumed to be from a process that died without cleaning up. */
 const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+
+/** Identifies the machine, so a pid is only trusted where it was recorded. */
+function hostName(): string {
+  return process.env["COMPUTERNAME"] || process.env["HOSTNAME"] || "local";
+}
 
 function lockPath(name: string): string {
   return resolve(OUT, `${name}.lock`);
@@ -53,8 +58,14 @@ export function readLock(name: string): LockInfo | null {
   try {
     return JSON.parse(readFileSync(file, "utf8")) as LockInfo;
   } catch {
-    // An unreadable lock file is still a lock; treat it as held by an unknown process.
-    return { pid: -1, mode: "unknown", startedAt: new Date(0).toISOString(), host: "unknown" };
+    // An unreadable lock file is still a lock, and it must READ as held.
+    //
+    // This used to return startedAt = epoch 0, which made the age check see it as ~29
+    // million minutes old and clear it - so a lock file that was empty (a process that
+    // died between creating the file and writing to it) was silently stolen, which is
+    // exactly the corruption this module exists to prevent. `now` keeps it held; only the
+    // real staleness window can retire it.
+    return { pid: -1, mode: "unknown (unreadable lock)", startedAt: new Date().toISOString(), host: "unknown" };
   }
 }
 
@@ -80,18 +91,31 @@ export function acquireLock(name: string, mode: string): () => void {
   mkdirSync(OUT, { recursive: true });
   const file = lockPath(name);
 
+  const thisHost = hostName();
   const existing = readLock(name);
   if (existing) {
     const age = Date.now() - Date.parse(existing.startedAt);
-    const dead = existing.pid > 0 && !alive(existing.pid);
+    // A pid only means something on the machine that recorded it. output/ can live in a
+    // synced folder (this repo sits under OneDrive), where pid 1234 on another machine is
+    // unrelated to pid 1234 here - so liveness is only consulted for our own host.
+    const sameHost = existing.host === thisHost;
+    const dead = sameHost && existing.pid > 0 && !alive(existing.pid);
     const stale = Number.isFinite(age) && age > STALE_AFTER_MS;
 
     if (dead || stale) {
       console.log(
-        `  clearing a ${dead ? "dead" : "stale"} lock from pid ${existing.pid}` +
+        `  retiring a ${dead ? "dead" : "stale"} lock from pid ${existing.pid}` +
+          `${sameHost ? "" : ` on host ${existing.host}`}` +
           `${stale ? ` (${Math.round(age / 60000)} min old)` : ""}`,
       );
-      rmSync(file, { force: true });
+      // Rename rather than unlink. Two processes can both decide the same lock is dead;
+      // if both unlink and then create, both succeed and both crawl. Moving it aside means
+      // only one rename wins, and the `wx` create below still arbitrates the rest.
+      try {
+        renameSync(file, `${file}.retired-${Date.now().toString(36)}`);
+      } catch {
+        // Someone else retired it first. That is fine - the create below decides.
+      }
     } else {
       throw new LockHeldError(existing, name);
     }
@@ -101,7 +125,7 @@ export function acquireLock(name: string, mode: string): () => void {
     pid: process.pid,
     mode,
     startedAt: new Date().toISOString(),
-    host: process.env["COMPUTERNAME"] ?? process.env["HOSTNAME"] ?? "local",
+    host: thisHost,
   };
 
   let fd: number;
@@ -114,14 +138,27 @@ export function acquireLock(name: string, mode: string): () => void {
     }
     throw err;
   }
-  closeSync(fd);
-  writeFileSync(file, `${JSON.stringify(info, null, 2)}\n`);
+
+  // Write THROUGH the descriptor we just created exclusively, then close. Creating the
+  // file and writing it in two steps leaves a window - and, if the process dies inside it,
+  // a permanent empty lock file - in which the lock describes nobody.
+  try {
+    writeFileSync(fd, `${JSON.stringify(info, null, 2)}\n`);
+  } finally {
+    closeSync(fd);
+  }
 
   let released = false;
   const release = (): void => {
     if (released) return;
     released = true;
-    rmSync(file, { force: true });
+    // Only remove a lock that is still OURS. Removing by path meant a process exiting
+    // after its own lock had been retired would delete whichever lock had replaced it -
+    // unlocking a live crawl and cascading to the next one.
+    const current = readLock(name);
+    if (current && current.pid === process.pid && current.host === thisHost) {
+      rmSync(file, { force: true });
+    }
     held.delete(release);
     // Drop the signal handlers once nothing is locked. Leaving them attached keeps the
     // Node event loop referenced, so a process with no other work will not exit - which

@@ -69,14 +69,43 @@ function readJsonl<T>(name: string): T[] {
  * source is a weaker signal than parsing the AST, but it never claims coverage that is not
  * literally written down somewhere, and it cannot be fooled into silence by a refactor.
  */
+/**
+ * Strip comments, so a path named only in a `// todo: test /checkboxes` cannot be counted
+ * as coverage. A metric that credits an unwritten test is worse than no metric.
+ */
+export function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1 ");
+}
+
 function specHaystack(): { text: string; files: string[] } {
   if (!existsSync(TESTS)) return { text: "", files: [] };
   const files = readdirSync(TESTS).filter((f) => f.endsWith(".ts"));
   const text = files
-    .map((f) => readFileSync(resolve(TESTS, f), "utf8"))
+    .map((f) => stripComments(readFileSync(resolve(TESTS, f), "utf8")))
     .join("\n")
     .toLowerCase();
   return { text, files };
+}
+
+/**
+ * Does a spec actually NAVIGATE to this path, rather than merely contain the string?
+ *
+ * A bare substring test credited `/notification_message` to a spec that only ever visits
+ * `/notification_message_rendered`, because the shorter path is a substring of the longer -
+ * and once the anonymous-form fallback keys off the same signal, that laundered straight
+ * into forms.covered. Requiring a quoted, terminated occurrence fixes both.
+ */
+export function visitsPath(haystack: string, path: string): boolean {
+  if (path.length <= 1) return false;
+  const p = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The path must end at the quote, a query, a hash, or a trailing slash - not run on
+  // into a longer path.
+  // The path must END at the closing quote, an optional trailing slash, or a query/hash
+  // whose remainder runs to the quote. Demanding a quote immediately after ? or # rejected
+  // the perfectly ordinary `page.goto("/upload?x=1")`.
+  return new RegExp(`["'\`]${p}(?:/?["'\`]|[?#][^"'\`]*["'\`])`).test(haystack);
 }
 
 /** The path part, which is what a spec realistically contains. */
@@ -98,10 +127,13 @@ export function computeCoverage(
   const byTemplate = new Map<string, PageRecord>();
   for (const p of pages) {
     if (p.ok === false) continue;
-    // A page that does not exist is not an untested page. /about, /gallery and /users/:id
-    // are 404s the crawler followed from a random menu; counting them in the denominator
-    // made coverage read 16% when the real figure over reachable pages was much higher.
-    if ((p.status ?? 0) >= 400) continue;
+    // A page that does not EXIST is not an untested page - 404 and 410 are absent, and
+    // counting them made coverage read 16% when the real figure over reachable pages was
+    // far higher. A 5xx is different: the page exists and is broken, which is precisely
+    // what you want counted. Excluding it let a site erroring under load RAISE its own
+    // coverage score, and dropped the very page F-010 was found on.
+    const status = p.status ?? 0;
+    if (status === 404 || status === 410) continue;
     const prev = byTemplate.get(p.template);
     const score = (r: PageRecord): number => r.forms.length * 10 + r.buttons.length;
     if (!prev || score(p) > score(prev)) byTemplate.set(p.template, p);
@@ -120,7 +152,7 @@ export function computeCoverage(
   for (const [template, page] of byTemplate) {
     const path = pathOf(page.url);
     // A template counts as covered if a spec mentions its path, or Phase 5 mapped it.
-    const inSpec = path.length > 1 && specs.text.includes(path);
+    const inSpec = visitsPath(specs.text, path);
     const inFeatures = featureTemplates.has(template) || featureTemplates.has(page.url);
     const covered = inSpec || inFeatures;
 
