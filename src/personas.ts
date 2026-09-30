@@ -15,7 +15,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT, loadConfig, type PersonaConfig } from "./config.js";
+import { ROOT, loadConfig, env, type PersonaConfig } from "./config.js";
 import { getProvider } from "./email/lib.js";
 
 const AUTH_DIR = resolve(ROOT, "output", "auth");
@@ -120,7 +120,7 @@ export async function loadPersonas(): Promise<Persona[]> {
       id: want.id,
       role: want.role ?? want.id,
       email: inbox.address,
-      password: want.password ?? process.env["TEST_PASSWORD"] ?? sitePassword(want.id),
+      password: want.password || env("TEST_PASSWORD") || sitePassword(want.id),
       ...(inbox.secret === undefined ? {} : { mailboxSecret: inbox.secret }),
       statePath: statePathFor(want.id),
       createdAt: new Date().toISOString(),

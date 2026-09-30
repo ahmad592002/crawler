@@ -98,6 +98,10 @@ export function computeCoverage(
   const byTemplate = new Map<string, PageRecord>();
   for (const p of pages) {
     if (p.ok === false) continue;
+    // A page that does not exist is not an untested page. /about, /gallery and /users/:id
+    // are 404s the crawler followed from a random menu; counting them in the denominator
+    // made coverage read 16% when the real figure over reachable pages was much higher.
+    if ((p.status ?? 0) >= 400) continue;
     const prev = byTemplate.get(p.template);
     const score = (r: PageRecord): number => r.forms.length * 10 + r.buttons.length;
     if (!prev || score(p) > score(prev)) byTemplate.set(p.template, p);
@@ -141,10 +145,19 @@ export function computeCoverage(
       formsTotal++;
       const action = (form.action || "").toLowerCase();
       const fieldsNamed = form.fields.filter((f) => f.name).map((f) => f.name.toLowerCase());
+
       // A form is covered when the spec references its action, or names a field of it.
-      const hit =
+      let hit =
         (action.length > 1 && specs.text.includes(action)) ||
         fieldsNamed.some((n) => n.length > 2 && specs.text.includes(n));
+
+      // An anonymous form - no action, no named fields - offers nothing to key on, so the
+      // rules above can NEVER credit it no matter how thoroughly it is tested. /checkboxes
+      // is exactly that shape, and it stayed listed as untested after a spec was written
+      // for it. Fall back to the page: if a spec visits this page, the form on it counts.
+      if (!hit && action.length <= 1 && fieldsNamed.length === 0) {
+        hit = inSpec;
+      }
       if (hit) formsCovered++;
       else {
         gaps.push({

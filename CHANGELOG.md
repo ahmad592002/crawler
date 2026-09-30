@@ -250,3 +250,64 @@ Two guards exist because both failures happened while building it:
   setup project gates every other spec, so one slow response reported as "27 tests did not
   run" and looked like a broken suite.
 - Unit tests: 48, up from 38.
+
+## Coverage: 17% -> 56%, and the bug that was blocking every run
+
+### The suite could not run, and it was never the host
+
+`.env` contained `TEST_PASSWORD=` — an empty string — and `??` only falls back on `null`
+or `undefined`. The login therefore submitted a **blank password**, sat on `/login`, and
+`waitForURL(/\/secure$/)` timed out. The setup project gates every other spec, so this
+reported as "32 tests did not run".
+
+It was misdiagnosed twice as a slow demo host and survived two timeout increases (90s ->
+180s, per-test 120s -> 240s). Neither could ever have fixed it. The persona setup passed
+throughout, because personas take their password from `qa.config.json`, not the environment
+— that contrast was the clue.
+
+The same pattern existed in four places, including `src/email/lib.ts`, where an empty
+`EMAIL_PROVIDER` would have selected no provider at all. All now go through `env()` in
+`src/config.ts`, which treats empty as absent.
+
+### Two measurement bugs were inflating the gap
+
+- **404s counted in the denominator.** `/about`, `/gallery`, `/users/:id` are pages the
+  crawler followed from a randomised menu and that do not exist. A page that 404s is not an
+  untested page. Denominator 64 -> 54.
+- **Anonymous forms could never be credited.** Coverage keyed on a form's `action` or a
+  field `name`; `/checkboxes` has neither, so it stayed listed as untested *after* a spec
+  was written for it — permanently uncoverable. Such forms are now credited when a spec
+  visits their page, with a test asserting that forms which DO offer something to match are
+  still not credited that cheaply.
+
+### 37 new tests
+
+`tests/forms.spec.ts`, `tests/interactions.spec.ts`, `tests/structure.spec.ts`: upload
+round-trip and unicode filenames, checkbox state and keyboard operation, hovers, HTML5
+drag-and-drop, slider bounds, all three dialog types with explicit handlers, popup windows,
+nested frames, shadow DOM, table sorting, async loading, infinite scroll, status codes,
+flash-message lifecycle.
+
+| | before | after |
+|---|---|---|
+| templates | 17% (9/54) | 56% (30/54) |
+| forms | 43% (3/7) | 100% (7/7) |
+| controls | 30% (9/30) | 50% (15/30) |
+| Playwright tests | 28 | 72 |
+| unit tests | 48 | 53 |
+
+Suite: 68 passed, 4 skipped, 0 failed, 3.7 min.
+
+### Two findings from writing the tests
+
+- **F-010 (high)**: `/upload` with no file selected returns HTTP 500 rather than a
+  validation message. Captured as `test.fail()`.
+- `/notification_message_rendered` visited directly shows an empty flash container; the
+  flash exists only via the redirect that sets it. Asserted both ways.
+
+### One honest non-finding
+
+The TinyMCE editor on `/iframe` never initialises because it loads from `cdn.tiny.cloud`,
+which fails with **and** without the off-origin block — unreachable from this network. That
+test skips with a stated reason rather than failing red: an unmet precondition is not a
+defect, and red tests that people learn to ignore are worse than no tests.

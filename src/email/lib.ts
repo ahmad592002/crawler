@@ -7,7 +7,7 @@
 import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT } from "../config.js";
+import { ROOT, env } from "../config.js";
 import { imapProvider } from "./imap.js";
 import { mailtmProvider } from "./mailtm.js";
 import type { EmailProvider, FoundEmail, TestInbox, WaitForEmailOptions } from "./types.js";
@@ -32,7 +32,7 @@ function configuredProvider(): string | null {
 }
 
 export function getProvider(name?: string): EmailProvider {
-  const wanted = name ?? process.env["EMAIL_PROVIDER"] ?? configuredProvider() ?? "mailtm";
+  const wanted = name || env("EMAIL_PROVIDER") || configuredProvider() || "mailtm";
   const provider = PROVIDERS[wanted];
   if (!provider) {
     throw new Error(`Unknown email provider "${wanted}". Use one of: ${Object.keys(PROVIDERS).join(", ")}`);

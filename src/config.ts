@@ -196,3 +196,17 @@ export function isDeniedUrl(url: string, cfg: QaConfig): boolean {
 
 /** One entry of qa.config.json "personas". */
 export type PersonaConfig = NonNullable<QaConfig["personas"]>[number];
+
+/**
+ * An environment variable, treating empty as absent.
+ *
+ * `process.env.X ?? fallback` does NOT fall back on an empty string, and a .env written as
+ * `TEST_PASSWORD=` produces exactly that. The login then submitted a blank password, sat on
+ * /login, and the setup project failed with a navigation timeout that looked for all the
+ * world like a slow host - it survived two timeout increases before being diagnosed.
+ */
+export function env(name: string, fallback?: string): string | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  return raw;
+}

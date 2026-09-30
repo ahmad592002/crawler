@@ -155,3 +155,78 @@ test("the richest sample of a template is the one measured", () => {
   );
   assert.equal(cov.forms.total, 1);
 });
+
+test("a 404 page is not counted as an untested page", () => {
+  const cov = computeCoverage(
+    [
+      page({ url: "https://t.test/real", template: "https://t.test/real", status: 200 }),
+      page({ url: "https://t.test/gone", template: "https://t.test/gone", status: 404 }),
+    ],
+    noFeatures,
+    specs(`page.goto("/real")`),
+  );
+  // One reachable page, and it is covered: 100%, not 50%.
+  assert.equal(cov.templates.total, 1);
+  assert.equal(cov.templates.covered, 1);
+});
+
+test("a 500 page is excluded from the denominator too", () => {
+  const cov = computeCoverage(
+    [page({ url: "https://t.test/boom", template: "https://t.test/boom", status: 500 })],
+    noFeatures,
+    specs(""),
+  );
+  assert.equal(cov.templates.total, 0);
+});
+
+test("an anonymous form is credited when a spec visits its page", () => {
+  // No action and no named fields: there is nothing else to match on, so refusing to
+  // credit it would make the form permanently uncoverable.
+  const cov = computeCoverage(
+    [
+      page({
+        url: "https://t.test/checkboxes",
+        template: "https://t.test/checkboxes",
+        forms: [{ action: "", method: "get", destructive: false,
+          fields: [{ name: "", type: "checkbox", label: "", required: false }] }],
+      }),
+    ],
+    noFeatures,
+    specs(`await page.goto("/checkboxes")`),
+  );
+  assert.equal(cov.forms.covered, 1);
+  assert.equal(cov.gaps.filter((g) => g.kind === "form").length, 0);
+});
+
+test("an anonymous form on a page no spec visits is still a gap", () => {
+  const cov = computeCoverage(
+    [
+      page({
+        url: "https://t.test/orphan",
+        template: "https://t.test/orphan",
+        forms: [{ action: "", method: "get", destructive: false,
+          fields: [{ name: "", type: "checkbox", label: "", required: false }] }],
+      }),
+    ],
+    noFeatures,
+    specs(`await page.goto("/elsewhere")`),
+  );
+  assert.equal(cov.forms.covered, 0);
+});
+
+test("a NAMED form is not credited just because the page is visited", () => {
+  // The fallback must not weaken the rule for forms that do offer something to match.
+  const cov = computeCoverage(
+    [
+      page({
+        url: "https://t.test/signup",
+        template: "https://t.test/signup",
+        forms: [{ action: "/register", method: "post", destructive: false,
+          fields: [{ name: "email", type: "email", label: "Email", required: true }] }],
+      }),
+    ],
+    noFeatures,
+    specs(`await page.goto("/signup")`),
+  );
+  assert.equal(cov.forms.covered, 0);
+});

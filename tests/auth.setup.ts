@@ -9,12 +9,12 @@
 import { test as setup, expect, safeClick } from "./fixtures.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT } from "../src/config.js";
+import { ROOT, env } from "../src/config.js";
 
 const STATE = resolve(ROOT, "output/auth/state.json");
 
-const USERNAME = process.env["TEST_USERNAME"] ?? "tomsmith";
-const PASSWORD = process.env["TEST_PASSWORD"] ?? "SuperSecretPassword!";
+const USERNAME = env("TEST_USERNAME", "tomsmith")!;
+const PASSWORD = env("TEST_PASSWORD", "SuperSecretPassword!")!;
 
 setup("log in and save session", async ({ page }) => {
   mkdirSync(resolve(ROOT, "output/auth"), { recursive: true });
