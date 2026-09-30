@@ -14,7 +14,7 @@
  * Read-only by construction: GET only, and any URL the deny-list considers destructive is
  * skipped rather than requested.
  */
-import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { request, type APIRequestContext } from "playwright";
 import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
@@ -153,11 +153,27 @@ const MIN_CONTENT_CHARS = 40;
  * the same page, not a trimmed "you have no access to this" variant.
  */
 export function sameResource(a: Probe, b: Probe): boolean {
-  if (!reachedResource(a) || !reachedResource(b)) return false;
-  if (a.length === 0 || b.length === 0) return a.length === b.length;
-  const ratio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
-  return ratio > 0.9;
+  return similarity(a, b) > 0.9;
 }
+
+/**
+ * How alike two successful responses are, 0 to 1. Returns 0 if either did not reach the
+ * resource at all.
+ *
+ * A single boolean at 0.9 was a false-negative knob with no middle ground: a real IDOR
+ * where B reads A's data but sees a different nav, no owner-only banner and no edit
+ * controls routinely differs by more than 10%, and every one of those was discarded with
+ * no record that a near-miss had even been considered. Exposing the ratio lets the caller
+ * report a maybe instead of silently deciding no.
+ */
+export function similarity(a: Probe, b: Probe): number {
+  if (!reachedResource(a) || !reachedResource(b)) return 0;
+  if (a.length === 0 || b.length === 0) return a.length === b.length ? 1 : 0;
+  return Math.min(a.length, b.length) / Math.max(a.length, b.length);
+}
+
+/** Below this a near-miss is not worth reporting; above SAME it is a finding outright. */
+export const NEAR_MISS_FLOOR = 0.5;
 
 async function probe(ctx: APIRequestContext, url: string, timeoutMs: number): Promise<Probe | null> {
   try {
@@ -352,7 +368,10 @@ async function main(): Promise<void> {
           unreachable++;
           continue;
         }
-        if (sameResource(base!, p)) {
+        const ratio = similarity(base!, p);
+        const pct = Math.round(ratio * 100);
+
+        if (ratio > 0.9) {
           findings.push({
             id: `Z-${String(++n).padStart(2, "0")}`,
             url,
@@ -364,7 +383,28 @@ async function main(): Promise<void> {
               "Compare the responses",
             ],
             expected: `403, 404, or a page scoped to ${other.persona.id}'s own data`,
-            actual: `HTTP ${p.status}, ${p.length} bytes vs ${base!.length} - effectively the same page`,
+            actual: `HTTP ${p.status}, ${p.length} bytes vs ${base!.length} - ${pct}% alike, effectively the same page`,
+            source: "authz",
+          });
+        } else if (ratio >= NEAR_MISS_FLOOR) {
+          // Reported rather than discarded. A partial match is what a real IDOR looks like
+          // when the other user sees the same record without the owner's edit controls or
+          // banner - the case the old boolean threw away with no record at all.
+          findings.push({
+            id: `Z-${String(++n).padStart(2, "0")}`,
+            url,
+            feature: `Possible cross-user read: ${other.persona.id} got a similar page to ${owner!.persona.id}'s`,
+            severity: "medium",
+            steps: [
+              `Sign in as ${owner!.persona.id} and open ${url}`,
+              `Request the same URL with ${other.persona.id}'s session`,
+              "Compare the two responses by eye - this one needs a human",
+            ],
+            expected: `403, 404, or a page containing only ${other.persona.id}'s own data`,
+            actual:
+              `HTTP ${p.status}, ${p.length} bytes vs ${base!.length} - ${pct}% alike. ` +
+              `Not identical, so it may be a correctly scoped page; it may also be the same ` +
+              `record without the owner's controls.`,
             source: "authz",
           });
         }
@@ -382,6 +422,34 @@ async function main(): Promise<void> {
   // Refuse to report a clean result from a scan that could not reach the target. Silence
   // must never be mistaken for safety.
   const failRate = attempted === 0 ? 1 : unreachable / attempted;
+
+  // Write the scan's own verdict to disk BEFORE any exit path. An inconclusive run that
+  // leaves no trace looks identical to a clean one downstream - report.html had no way to
+  // tell them apart, so a report built from a scan that proved nothing read as reassuring.
+  writeFileSync(
+    resolve(OUT, "authz-status.json"),
+    `${JSON.stringify(
+      {
+        ranAt: new Date().toISOString(),
+        templates: targets.length,
+        compared: ledger.compared,
+        baselineUnreachable: ledger.baselineUnreachable,
+        classifiedLogin: ledger.classifiedLogin,
+        probesAttempted: attempted,
+        probesFailed: unreachable,
+        personas: personas.map((p) => p.id),
+        sharedIdentity: shared,
+        verdict:
+          ledger.compared === 0 || failRate > 0.25
+            ? "inconclusive"
+            : findings.length > 0
+              ? "findings"
+              : "clean",
+      },
+      null,
+      2,
+    )}\n`,
+  );
   if (failRate > 0.25) {
     console.error(
       `SCAN INCONCLUSIVE - ${unreachable} of ${attempted} requests could not be completed ` +

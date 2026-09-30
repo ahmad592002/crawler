@@ -5,7 +5,7 @@
  * default waitUntil:"load" waits on tracker requests that may hang or fail to resolve,
  * which shows up as a navigation timeout that has nothing to do with the site under test.
  */
-import { test as base, expect, type Page, type Browser, type BrowserContext } from "@playwright/test";
+import { test as base, expect, type Page, type Locator, type Browser, type BrowserContext } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { loadConfig, isDenied, isDeniedUrl, isAllowedUrl } from "../src/config.js";
 import { personaById, type Persona } from "../src/personas.js";
@@ -209,6 +209,60 @@ async function guardedClick(page: Page, role: "button" | "link", name: string | 
 }
 
 /** Click a button, refusing anything the deny-list covers. Use this, not `.click()`. */
+/**
+ * Guarded click for a locator that is not addressable by role and name.
+ *
+ * A table header, a hot-spot div, a CSS-selected element - `safeClick` cannot express any
+ * of them, so every legitimate need became a bare `.click()`, which CLAUDE.md forbids. The
+ * absence of this function is why ten violations existed: the rule had no compliant path.
+ *
+ * The check is the same one `safeClick` applies, and it runs against the element the
+ * locator actually resolved to.
+ */
+export async function safeClickLocator(
+  locator: Locator,
+  options?: { button?: "left" | "right" | "middle"; label?: string },
+): Promise<void> {
+  const count = await locator.count();
+  if (count === 0) throw new Error(`safeClickLocator: locator matched nothing`);
+  if (count > 1) {
+    throw new Error(
+      `safeClickLocator: ${count} elements match - refusing to guess which one. Narrow the locator.`,
+    );
+  }
+
+  const candidates = await locator.evaluate((el) => [
+    el.getAttribute("aria-label") ?? "",
+    el.textContent ?? "",
+    el.getAttribute("title") ?? "",
+    el.getAttribute("value") ?? "",
+    (el as HTMLAnchorElement).href ?? "",
+    el.getAttribute("formaction") ?? "",
+    el.closest("form")?.getAttribute("action") ?? "",
+  ]);
+
+  for (const candidate of [...candidates, options?.label ?? ""]) {
+    if (!candidate) continue;
+    const denied = /^https?:|^\//.test(candidate)
+      ? isDeniedUrl(candidate, cfg)
+      : isDenied(candidate, cfg);
+    if (denied) {
+      throw new Error(
+        `Refusing to click: the resolved element matches qa.config.json denyList via ` +
+          `${JSON.stringify(candidate.slice(0, 120))}. ` +
+          `Record it as "skipped: destructive" in findings.jsonl instead.`,
+      );
+    }
+  }
+
+  await locator.click(options?.button ? { button: options.button } : undefined);
+}
+
+/** Guarded right-click. Same checks; a context menu can be as destructive as a button. */
+export function safeRightClick(locator: Locator, label?: string): Promise<void> {
+  return safeClickLocator(locator, { button: "right", ...(label === undefined ? {} : { label }) });
+}
+
 export function safeClick(page: Page, name: string | RegExp): Promise<void> {
   return guardedClick(page, "button", name);
 }

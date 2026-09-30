@@ -8,7 +8,7 @@
  * dialog silently vacuous. Every dialog test below installs an explicit handler and
  * asserts on what it captured.
  */
-import { test, expect, safeClick } from "./fixtures.js";
+import { test, expect, safeClick, safeClickLink, safeRightClick } from "./fixtures.js";
 
 test.describe("hovers", () => {
   test("hovering a figure reveals its caption and profile link", async ({ page }) => {
@@ -121,7 +121,7 @@ test.describe("new windows", () => {
     await page.goto("/windows");
 
     const opened = context.waitForEvent("page");
-    await page.getByRole("link", { name: "Click Here" }).click();
+    await safeClickLink(page, "Click Here");
     const child = await opened;
 
     await child.waitForLoadState("domcontentloaded");
@@ -144,7 +144,7 @@ test.describe("context menu", () => {
       void d.accept();
     });
 
-    await page.locator("#hot-spot").click({ button: "right" });
+    await safeRightClick(page.locator("#hot-spot"), "context menu hot spot");
     expect(message).toBe("You selected a context menu");
   });
 });

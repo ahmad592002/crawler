@@ -27,6 +27,40 @@ interface Finding {
   details?: string;
 }
 
+interface AuthzStatus {
+  verdict?: string;
+  templates?: number;
+  compared?: number;
+  baselineUnreachable?: number;
+  classifiedLogin?: number;
+  probesAttempted?: number;
+  probesFailed?: number;
+  personas?: string[];
+  sharedIdentity?: string[];
+}
+
+interface CoverageBucket {
+  total?: number;
+  covered?: number;
+}
+
+interface CoverageSummary {
+  templates?: CoverageBucket;
+  forms?: CoverageBucket;
+  controls?: CoverageBucket;
+}
+
+/** A single JSON file, or null. Absence is a state the report renders, not an error. */
+function readJson<T>(name: string): T | null {
+  const file = resolve(OUT, name);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
 interface Feature {
   feature: string;
   template?: string;
@@ -205,6 +239,10 @@ function main(): void {
   }));
   const features = readJsonl<Feature>("features.jsonl");
   const tests = testResults();
+  // Both are optional: a run without them shows an explicit empty state rather than nothing,
+  // because a missing authorization verdict used to be indistinguishable from a clean one.
+  const authz = readJson<AuthzStatus>("authz-status.json");
+  const coverage = readJson<CoverageSummary>("coverage.json");
 
   const bySeverity = SEVERITY_ORDER.map((sev) => ({
     sev,
@@ -391,6 +429,61 @@ ${
     ? `<div class="tablewrap"><table><thead><tr><th>Status</th><th>Spec</th></tr></thead><tbody>${specRows}</tbody></table></div>
        <p class="sub" style="margin-top:10px">Full Playwright report: <a href="pw-report/index.html">output/pw-report</a></p>`
     : `<div class="empty">No Playwright results. Run <code>npx playwright test</code> with the json reporter to populate this.</div>`
+}
+
+<h2>Authorization scan</h2>
+${
+  authz
+    ? `<div class="tablewrap"><table><thead><tr><th>Verdict</th><th>Compared</th><th>Skipped</th><th>Probes</th><th>Personas</th></tr></thead><tbody>
+       <tr>
+         <td><span class="sev ${authz.verdict === "clean" ? "low" : authz.verdict === "findings" ? "high" : "critical"}">${esc(authz.verdict)}</span></td>
+         <td>${num(authz.compared)} of ${num(authz.templates)}</td>
+         <td>${num(authz.baselineUnreachable)} unreachable, ${num(authz.classifiedLogin)} login page</td>
+         <td>${num(authz.probesFailed)} failed of ${num(authz.probesAttempted)}</td>
+         <td>${esc((authz.personas ?? []).join(", ") || "none")}</td>
+       </tr></tbody></table></div>
+       ${
+         authz.verdict === "inconclusive"
+           ? `<p class="sub" style="color:var(--bad);margin-top:10px"><strong>This scan proved nothing.</strong>
+              Too few templates were compared, or too many probes failed. Do not read the findings
+              above as a clean authorization result.</p>`
+           : ""
+       }
+       ${
+         (authz.sharedIdentity ?? []).length > 1
+           ? `<p class="sub" style="margin-top:10px">${esc((authz.sharedIdentity ?? []).join(" and "))}
+              share one account, so the user-to-user comparison was skipped. Give each persona its
+              own account on the target.</p>`
+           : ""
+       }`
+    : `<div class="empty">No authorization scan in this run. <code>npm run authz</code> writes output/authz-status.json.</div>`
+}
+
+<h2>Test coverage</h2>
+${
+  coverage
+    ? `<div class="tablewrap"><table><thead><tr><th>What</th><th>Covered</th><th>Share</th></tr></thead><tbody>
+       ${(
+         [
+           ["templates", coverage.templates],
+           ["forms", coverage.forms],
+           ["controls", coverage.controls],
+         ] as const
+       )
+         .map(([label, c]) => {
+           const total = num(c?.total);
+           const covered = num(c?.covered);
+           const pct = total === 0 ? 0 : Math.round((covered / total) * 100);
+           const tone = pct >= 80 ? "low" : pct >= 50 ? "medium" : "high";
+           return `<tr><td>${esc(label)}</td><td>${covered} / ${total}</td>
+                   <td><span class="sev ${tone}">${pct}%</span></td></tr>`;
+         })
+         .join("")}
+       </tbody></table></div>
+       <p class="sub" style="margin-top:10px">Coverage counts a page as tested only when a spec
+       navigates to it. 404 and 410 pages are excluded; a 5xx page is counted as a gap, because it
+       exists and is broken. Run <code>npm run coverage</code> for the per-gap list.</p>`
+    : `<div class="empty">No coverage data. <code>npm run coverage</code> writes output/coverage.json.</div>`
 }
 
 <h2>Skipped: destructive</h2>

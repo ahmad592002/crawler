@@ -16,7 +16,7 @@
  * persona into that same account and marks the sessions as not independent. Replace the
  * body of `signUpAndLogIn` for a real target; everything around it stays.
  */
-import { test as setup, expect } from "./fixtures.js";
+import { test as setup, expect, safeClick } from "./fixtures.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT, loadConfig } from "../src/config.js";
@@ -65,7 +65,7 @@ async function signUpAndLogIn(
   await page.goto("/login");
   await page.getByLabel("Username").fill(fixedUser);
   await page.getByLabel("Password").fill(persona.password);
-  await page.getByRole("button", { name: "Login" }).click();
+  await safeClick(page, "Login");
   await page.waitForURL(/\/secure$/);
   await expect(page.getByText("You logged into a secure area!")).toBeVisible();
 }
@@ -87,7 +87,7 @@ export async function signUpWithEmailVerification(
   await page.goto("/signup");
   await page.getByLabel(/email/i).fill(persona.email);
   await page.getByLabel(/password/i).first().fill(persona.password);
-  await page.getByRole("button", { name: /sign up|create account|register/i }).click();
+  await safeClick(page, /sign up|create account|register/i);
 
   const mail = await waitForEmail({ to: persona.email, since, timeoutSec: 120 });
   const body = `${mail.text}\n${mail.html}`;
@@ -95,7 +95,7 @@ export async function signUpWithEmailVerification(
   const code = extractCode(body);
   if (code) {
     await page.getByLabel(/code|verification/i).fill(code);
-    await page.getByRole("button", { name: /verify|confirm/i }).click();
+    await safeClick(page, /verify|confirm/i);
   } else {
     const [link] = extractLinks(body, new URL(cfg.baseUrl).host);
     if (!link) throw new Error(`No verification code or link in "${mail.subject}"`);

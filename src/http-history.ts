@@ -15,8 +15,32 @@ import type { BrowserContext, Response } from "playwright";
 import { ROOT, isAllowedUrl, type QaConfig } from "./config.js";
 
 const OUT = resolve(ROOT, "output");
-export const HISTORY_JSONL = resolve(OUT, "http-history.jsonl");
-export const HISTORY_XML = resolve(OUT, "http-history.xml");
+/**
+ * The capture is written PER MODE, mirroring pages.jsonl / pages.auth.jsonl.
+ *
+ * The crawler takes a lock named crawl-anon or crawl-auth, so an anonymous and an
+ * authenticated crawl may legitimately run at the same time by design. They used to append
+ * to one shared http-history.jsonl, which is exactly the interleaved-writer corruption the
+ * lock exists to prevent - the lock simply did not cover this file. Separate paths make
+ * concurrent modes safe, and keep an authenticated capture distinguishable from an
+ * anonymous one, which matters because only one of them carries a live session cookie.
+ */
+export function historyJsonl(mode: "anon" | "auth" = "anon"): string {
+  return resolve(OUT, mode === "auth" ? "http-history.auth.jsonl" : "http-history.jsonl");
+}
+
+export function historyXml(mode: "anon" | "auth" | "all" = "all"): string {
+  if (mode === "all") return resolve(OUT, "http-history.xml");
+  return resolve(OUT, mode === "auth" ? "http-history.auth.xml" : "http-history.anon.xml");
+}
+
+/** Every capture file that exists, so a reader never silently sees half the traffic. */
+export function historyFiles(): string[] {
+  return [historyJsonl("anon"), historyJsonl("auth")].filter((f) => existsSync(f));
+}
+
+export const HISTORY_JSONL = historyJsonl("anon");
+export const HISTORY_XML = historyXml("all");
 
 /** One captured request/response pair, already reconstructed as raw HTTP. */
 export interface HttpExchange {
@@ -55,6 +79,8 @@ export interface RecorderOptions {
   maxBodyBytes?: number;
   /** Capture third-party requests too. Off by default - keeps the capture on target. */
   includeOffOrigin?: boolean;
+  /** Which capture file to append to. Keeps concurrent anon and auth crawls apart. */
+  mode?: "anon" | "auth";
 }
 
 const DEFAULT_MAX_BODY = 2_000_000;
@@ -179,6 +205,7 @@ export async function drainHistory(): Promise<void> {
 
 export function recordHistory(context: BrowserContext, cfg: QaConfig, opts: RecorderOptions = {}): void {
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+  const target = historyJsonl(opts.mode ?? "anon");
 
   context.on("response", (response) => {
     const task = (async () => {

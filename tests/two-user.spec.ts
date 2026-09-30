@@ -12,7 +12,7 @@
  * skipped templates rather than removed - the structure is the point, and it is the part
  * that is easy to get subtly wrong.
  */
-import { test, expect, withTwoUsers, openAs, openAnonymous } from "./fixtures.js";
+import { test, expect, safeClick, withTwoUsers, openAs, openAnonymous } from "./fixtures.js";
 import { knownPersonas } from "../src/personas.js";
 
 const personas = knownPersonas();
@@ -55,7 +55,7 @@ test.describe("two users", () => {
       // A creates something private.
       await userA.page.goto("/documents/new");
       await userA.page.getByLabel("Title").fill(`private-${Date.now()}`);
-      await userA.page.getByRole("button", { name: "Create" }).click();
+      await safeClick(userA.page, "Create");
       const url = userA.page.url();
 
       // B, signed in as themselves, must not find it in their own listing.
@@ -74,7 +74,7 @@ test.describe("two users", () => {
     const stranger = await openAnonymous(browser);
     try {
       await userA.page.goto("/documents/new");
-      await userA.page.getByRole("button", { name: "Create" }).click();
+      await safeClick(userA.page, "Create");
       const url = userA.page.url();
 
       const res = await stranger.page.goto(url);
@@ -94,7 +94,7 @@ test.describe("two users", () => {
 
       await userA.page.goto("/team/invite");
       await userA.page.getByLabel(/email/i).fill(userB.persona.email);
-      await userA.page.getByRole("button", { name: /invite|send/i }).click();
+      await safeClick(userA.page, /invite|send/i);
       await expect(userA.page.getByText(/invitation sent/i)).toBeVisible();
 
       // The invite must arrive in B's OWN mailbox - this is why personas own real inboxes.
@@ -103,7 +103,7 @@ test.describe("two users", () => {
       expect(link, "no invitation link in the email B received").toBeTruthy();
 
       await userB.page.goto(link!);
-      await userB.page.getByRole("button", { name: /accept/i }).click();
+      await safeClick(userB.page, /accept/i);
 
       // Both sides must agree afterwards, which is the half that usually breaks.
       await expect(userB.page.getByText(/you (have )?joined/i)).toBeVisible();

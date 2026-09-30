@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
-import { recordHistory, writeBurpXml, drainHistory, HISTORY_JSONL } from "./http-history.js";
+import { recordHistory, writeBurpXml, drainHistory, historyJsonl } from "./http-history.js";
 import { acquireLock } from "./runlock.js";
 
 const OUT = resolve(ROOT, "output");
@@ -586,10 +586,11 @@ async function main(): Promise<void> {
   // and disk, and most crawls only want the page inventory.
   if (cfg.captureHttpHistory) {
     recordHistory(context, cfg, {
+      mode,
       maxBodyBytes: cfg.captureMaxBodyBytes,
       includeOffOrigin: cfg.captureOffOrigin,
     });
-    console.log(`Recording HTTP exchanges -> ${HISTORY_JSONL.split(/[\\/]/).pop()}`);
+    console.log(`Recording HTTP exchanges -> ${historyJsonl(mode).split(/[\\/]/).pop()}`);
   }
 
   // tsx/esbuild rewrites functions with a __name() helper that does not exist in the page,

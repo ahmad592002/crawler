@@ -4,7 +4,7 @@
  * Frames and shadow DOM matter disproportionately because they are where locators quietly
  * stop working - a selector that finds nothing looks identical to a feature that is broken.
  */
-import { test, expect, safeClick } from "./fixtures.js";
+import { test, expect, safeClick, safeClickLocator } from "./fixtures.js";
 
 test.describe("frames", () => {
   test("the iframe page renders its own chrome", async ({ page }) => {
@@ -91,7 +91,7 @@ test.describe("tables", () => {
     const lastNames = (): Promise<string[]> => table.locator("tbody tr td:first-child").allTextContents();
 
     const before = await lastNames();
-    await table.locator("thead th").first().click();
+    await safeClickLocator(table.locator("thead th").first());
     const after = await lastNames();
 
     expect(after).not.toEqual(before);
