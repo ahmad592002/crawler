@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
-import { recordHistory, writeBurpXml, drainHistory, historyJsonl } from "./http-history.js";
+import { recordHistory, writeBurpXml, drainHistory, historyJsonl, historyXml } from "./http-history.js";
 import { acquireLock } from "./runlock.js";
 
 const OUT = resolve(ROOT, "output");
@@ -764,8 +764,12 @@ async function main(): Promise<void> {
   console.log(`\nwrote ${outFile}`);
 
   if (cfg.captureHttpHistory) {
-    const n = writeBurpXml();
-    console.log(`wrote output/http-history.xml (${n} exchanges, Burp proxy-history format)`);
+    // Only THIS crawl's capture. An anonymous crawl must not emit a file containing the
+    // authenticated one.
+    const n = writeBurpXml(mode);
+    console.log(
+      `wrote ${historyXml(mode).split(/[\/]/).pop()} (${n} exchanges, Burp proxy-history format)`,
+    );
   }
 
   // Released here and also on exit/SIGINT, so a crash cannot leave a lock that blocks

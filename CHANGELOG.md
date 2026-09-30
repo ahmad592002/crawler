@@ -311,3 +311,52 @@ The TinyMCE editor on `/iframe` never initialises because it loads from `cdn.tin
 which fails with **and** without the off-origin block — unreachable from this network. That
 test skips with a stated reason rather than failing red: an unmet precondition is not a
 defect, and red tests that people learn to ignore are worse than no tests.
+
+## The audit loop: rounds 1-7
+
+A repeating build → audit → fix cycle, where each round's auditor is pointed at the
+PREVIOUS round's fixes. It has been worth running, and the reason is uncomfortable: every
+audit found real defects in code that had just been called done, and twice it found the
+defects were *in the fixes*.
+
+| Round | Found |
+|---|---|
+| 1 | 5 critical/high: crawler concurrency collapsed to 1, sitemap seeds all discarded, path traversal in the report, `javascript:` hrefs, CI auth crawl never ran |
+| 3 | 3 of those 5 fixes had introduced NEW defects, 2 worse than the originals |
+| 6 | the previous commit's headline fix had never been applied at all; the login classifier had regressed a second time; the new lint was evadable 4 ways out of 5 |
+
+### What the loop actually exposed
+
+**A fix is not evidence of a fix.** In round 6 a `node -e` string replacement failed
+silently, so the per-mode capture split was assigned to a variable nothing read - while the
+commit message described it as done. Worse than a no-op: the crawler then *printed* the new
+filename while writing the old one, so the tool lied about where session cookies were
+going. Three separate edits were silently corrupted by shell escaping across the session.
+Nothing containing a regex or a quote goes through `node -e` any more, and every edit is
+grepped before it is claimed.
+
+**Overshooting is as likely as undershooting.** Round 1 found a lock that could be stolen
+when its file was empty. The fix made an empty lock *immortal* - one truncated byte and the
+crawler refused forever. Round 1 found a login classifier that suppressed most of a site;
+the fix made it *fabricate* critical findings on any login page carrying a sign-up link.
+Both replacements were confidently commented as correct.
+
+**"Pinned by a test" was repeatedly false.** The login classifier regressed twice while its
+commit messages claimed tests existed. There was exactly one fixture - a bare login form -
+which happened to be the one shape that still worked. It now pins 19 shapes, taken from the
+audit's own reproducing table.
+
+**A guard with no compliant path gets bypassed.** CLAUDE.md forbids bare `.click()`, and ten
+violations had accumulated - most of them because `safeClick` could only address a button by
+role and name. A table header, a hot-spot div and a right-click had no guarded form at all.
+Adding `safeClickLocator` and `safeRightClick` removed the incentive; a lint test now fails
+the build on a new one, and its own evasions are tested.
+
+### The practice that is working
+
+Not the loop by itself - the narrower rule inside it: **every fix gets a test derived from
+the audit's reproducing input, written before moving on.** That is why the classifier has 19
+pinned shapes instead of one, why the lock has regression tests for both directions of its
+two failures, and why the lint has tests for the evasions that defeated its first version.
+
+Unit tests: 17 → 106 over the loop. All offline, no browser, no network, ~3s.

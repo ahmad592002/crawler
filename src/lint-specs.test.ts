@@ -8,9 +8,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { resolve } from "node:path";
 import { ROOT } from "./config.js";
+import { stripComments } from "./coverage.js";
 
 const TESTS = resolve(ROOT, "tests");
 
@@ -34,15 +37,64 @@ function findSpecs(dir: string): string[] {
 const specFiles = findSpecs(TESTS);
 
 /** Any way of reaching Locator.click - a call, bracket notation, or a saved reference. */
-const UNGUARDED_CLICK = /\.click\s*\(|\[\s*["'`]click["'`]\s*\]|\.click\b(?!\s*\()/;
+/**
+ * Ways of clicking that must go through a guard.
+ *
+ * Each alternative is here because an audit demonstrated it slipping past:
+ *   .click(              the obvious call
+ *   ["click"]()          bracket notation
+ *   .click not called    a saved reference, invoked later
+ *   dispatchEvent(click) the obvious next move after .click() is rejected, and the one that
+ *                        still performs a real click on a deny-listed control
+ *   { click } = ...      destructuring off a locator
+ */
+const UNGUARDED_CLICK = new RegExp(
+  [
+    String.raw`\.click\s*\(`,
+    String.raw`\[\s*["'\`]click["'\`]\s*\]`,
+    String.raw`\.click\b(?!\s*\()`,
+    String.raw`dispatchEvent\s*\(\s*["'\`]click`,
+    String.raw`\{[^}]*\bclick\b[^}]*\}\s*=`,
+  ].join("|"),
+);
+
+/**
+ * Shapes that merely LOOK like a click and must not be flagged.
+ *
+ * A lint that rejects valid code gets switched off, which is indistinguishable from having
+ * no lint. page.mouse.click takes coordinates, not a locator, so no guard can express it;
+ * a CSS class called `.click-me` is a selector, not a call; and an in-page DOM click inside
+ * evaluate() runs in the browser where the fixture does not exist.
+ */
+const NOT_A_LOCATOR_CLICK = new RegExp(
+  [
+    // Coordinates, not a locator - safeClickLocator cannot express it.
+    String.raw`page\.mouse\.click`,
+    // A CSS class or selector that merely starts with "click".
+    String.raw`\.click[-_][\w-]+`,
+    String.raw`class~?=["'][^"']*click`,
+    // Anything inside evaluate/evaluateAll runs IN THE PAGE, where the fixture does not
+    // exist. There is no guarded form, so flagging it only teaches people to ignore the rule.
+    String.raw`\.evaluate(?:All|Handle)?\s*\(`,
+  ].join("|"),
+);
 
 /** The sanctioned wrappers. Only a call to one of these exempts a line. */
 const GUARDED = /\bsafeClick\s*\(|\bsafeClickLink\s*\(|\bsafeClickLocator\s*\(|\bsafeRightClick\s*\(/;
 
-/** Strip line and block comments so a comment cannot exempt the code beside it. */
-function codeOnly(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1");
-}
+/**
+ * Strip comments, reusing the string-aware scanner from coverage.ts.
+ *
+ * This file had its own regex copy, which carried the exact flaw an audit found in the
+ * other one three rounds earlier: a block-comment OPENER inside a string literal began a
+ * comment that ran to the next closer anywhere in the file. A real violation vanished, and
+ * every reported line number after it was wrong. Two copies of a subtle function is how one
+ * of them stays broken.
+ *
+ * (Writing those two markers literally in this comment is what broke the build a moment
+ * ago, which is a fair demonstration of the problem.)
+ */
+const codeOnly = stripComments;
 
 test("no spec performs an unguarded click", () => {
   const offenders: string[] = [];
@@ -61,6 +113,8 @@ test("no spec performs an unguarded click", () => {
       // to call later. A trailing `.click` not followed by `(` covers every reference form,
       // including ones behind a call like `page.locator("#x").click`.
       if (!UNGUARDED_CLICK.test(line)) return;
+      // Not a Locator click - no guard exists or is needed.
+      if (NOT_A_LOCATOR_CLICK.test(line)) return;
       // The guarded helpers are the only sanctioned way to click.
       if (GUARDED.test(line)) return;
       // submitAndWait takes a click PROMISE, so a guarded click inside it is fine - but the
@@ -99,6 +153,7 @@ test("fixtures.ts exports a guarded path for every click shape", () => {
  * rather than a copy that can drift out of step with them.
  */
 function isUnguardedClick(line: string): boolean {
+  if (NOT_A_LOCATOR_CLICK.test(line)) return false;
   return UNGUARDED_CLICK.test(line) && !GUARDED.test(line);
 }
 
@@ -135,12 +190,66 @@ test("a genuinely guarded click still passes", () => {
   }
 });
 
-test("the lint scans nested spec directories", () => {
-  // Phase 6 GENERATES specs, so a flat readdir missed the files most likely to contain a
-  // machine-written unguarded click.
-  assert.ok(
-    findSpecs(TESTS).every((f) => f.includes(TESTS)),
-    "findSpecs returned a path outside tests/",
+
+// =============================================================== round-8 audit
+
+test("dispatchEvent('click') is caught - the obvious move after .click() is rejected", () => {
+  assert.equal(
+    isUnguardedClick(`await page.getByRole("button", { name: "Delete account" }).dispatchEvent("click");`),
+    true,
   );
-  assert.ok(findSpecs(TESTS).length >= 5, "found suspiciously few specs");
+});
+
+test("destructuring click off a locator is caught", () => {
+  assert.equal(isUnguardedClick(`const { click } = page.locator("#danger"); await click();`), true);
+});
+
+test("legitimate code that merely mentions click is NOT flagged", () => {
+  // A lint that rejects valid code gets switched off, which is the same as no lint.
+  for (const line of [
+    `await page.mouse.click(120, 240);`,
+    `await page.locator(".click-me").waitFor();`,
+    `await page.locator('[class~="click-area"]').waitFor();`,
+    `await page.evaluate(() => document.querySelector("#x")?.click());`,
+    `const handler = { onclick: noop };`,
+    `await page.locator("#x").dblclick();`,
+    `expect(label).toBe("[click] Login");`,
+  ]) {
+    assert.equal(isUnguardedClick(line), false, `false positive: ${line}`);
+  }
+});
+
+test("a block-comment marker inside a string cannot hide a violation", () => {
+  // The lint's own comment stripper had the flaw it was written to avoid.
+  const src = [
+    `await page.fill("#comment", "/* not a comment");`,
+    `await page.locator("#really-dangerous").click();`,
+    `await page.fill("#comment2", "*/");`,
+    `await page.locator("#second-violation").click();`,
+  ].join("\n");
+
+  const offenders = codeOnly(src)
+    .split("\n")
+    .map((line, i) => ({ line, n: i + 1 }))
+    .filter(({ line }) => isUnguardedClick(line));
+
+  assert.equal(offenders.length, 2, "a violation was swallowed by a string-borne comment marker");
+  assert.deepEqual(offenders.map((o) => o.n), [2, 4], "line numbers shifted");
+});
+
+test("the lint really does recurse into nested spec directories", () => {
+  // The previous version of this test asserted only that every path was under tests/ and
+  // that there were at least five - both true of a FLAT readdir, so the recursion it was
+  // named for was never exercised. This builds a nested tree and proves it is walked.
+  const box = mkdtempSync(join(tmpdir(), "qa-lint-"));
+  mkdirSync(join(box, "generated", "deep"), { recursive: true });
+  writeFileSync(join(box, "top.spec.ts"), "//\n");
+  writeFileSync(join(box, "generated", "mid.spec.ts"), "//\n");
+  writeFileSync(join(box, "generated", "deep", "low.setup.ts"), "//\n");
+  writeFileSync(join(box, "generated", "ignored.txt"), "not a spec\n");
+
+  const found = findSpecs(box).map((f) => f.replace(box, "").split(sep).join("/"));
+  rmSync(box, { recursive: true, force: true });
+
+  assert.deepEqual(found.sort(), ["/generated/deep/low.setup.ts", "/generated/mid.spec.ts", "/top.spec.ts"]);
 });

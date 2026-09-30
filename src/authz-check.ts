@@ -60,83 +60,117 @@ export interface Probe {
  * enough to plausibly BE a sign-in page rather than an application screen containing one.
  */
 /**
- * Replacement for looksLikeLoginPage.
+ * Does this response deny access, rather than serve the resource?
  *
- * The bug that has now shipped twice: negative signals ("this looks like a settings page")
- * were evaluated BEFORE the positive test, and returned false unconditionally. Since a real
- * consumer login page almost always carries a sign-up link, and an enterprise one often
- * sits in a layout with a logout link, one negative match disarmed the whole classifier -
- * and a missed login page is not a harmless miss: the owner's expired session then compares
- * equal to an anonymous request on every URL, which FABRICATES critical findings.
+ * Third rewrite. The first suppressed most of a site; the second fabricated criticals on
+ * any login page carrying a sign-up link; the third missed two-step and non-Latin login
+ * pages because it keyed on SUBMIT-BUTTON WORDING. Each time the tests were green, because
+ * the fixtures were written from the classifier's own vocabulary.
  *
- * The order is therefore: interstitial, then the positive form test, and only then the
- * negative signals - which now only run when the positive test did NOT fire, to separate a
- * settings page (has a password field, is not a gate) from a login page.
+ * So this version keys on STRUCTURE, which survives translation and rewording:
+ *
+ *   - a credential input (type=password, or an autocomplete token browsers only put on
+ *     sign-in forms: current-password, one-time-code, username)
+ *   - a form whose ACTION is an auth route
+ *   - an explicit deny envelope (401-style prose, or a JSON error body)
+ *
+ * Wording is used only to break ties, never as the sole signal, and never to decide that
+ * something is NOT a login page.
  */
+
+/** Auth-ish form actions, in the spellings real frameworks use. */
+const AUTH_ACTION =
+  /action=["'][^"']*(?:log[-_]?in|sign[-_]?in|signin|authenticate|auth\b|session|sso|saml|oauth|oidc|j_spring_security|wp-login|accounts\/login|dukhul|vhod|ninshou|connexion|anmeld)/i;
+
+/** An action that plainly performs an operation on an existing account, not a sign-in. */
+const OPERATION_ACTION =
+  /action=["'][^"']*(?:settings|preferences|profile|disable|enable|update|delete|remove|revoke|create|new|invite|webhook|billing|2fa|mfa)/i;
+
+/** Inputs that only appear on a sign-in or verification step. */
+const CREDENTIAL_INPUT =
+  /<input[^>]+(?:type=["']?password|autocomplete=["'](?:current-password|one-time-code|username)["']|name=["']?(?:otp|passcode|one_?time|identifier|j_username|j_password)\b)/i;
+
+/** An identifier field, in several languages and framework conventions. */
+const IDENTIFIER_INPUT =
+  /<input[^>]+(?:name|id)=["']?(?:j_)?(?:user(?:name|id)?|email|e?mail|login|account|identifier|benutzer|utilisateur|usuario|correo|kullanici|logowanie)/i;
+
+/** Chrome that only an authenticated application page carries. */
+const APP_CHROME = /(?:sign|log)\s?out\b|href=["'][^"']*logout|<nav[^>]*>[\s\S]{0,400}?<\/nav>/i;
+
+/** A JSON body, as opposed to a document. */
+function isJsonBody(body: string): boolean {
+  const t = body.trim();
+  return (t.startsWith("{") || t.startsWith("[")) && /["']\w+["']\s*:/.test(t.slice(0, 2000));
+}
+
 export function looksLikeLoginPage(body: string): boolean {
   const head = body.slice(0, 60_000);
 
-  // ---- 1. An explicit "you are not allowed in" interstitial. -------------------------
-  if (/you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head)) return true;
-  if (/(?:please\s+)?(?:log\s?in|sign\s?in) to (?:view|continue|access)/i.test(head)) return true;
-  if (/your session has (?:expired|timed out)|session expired/i.test(head)) return true;
-
-  const hasPasswordInput = /<input[^>]+type=["']?password/i.test(head);
-  const hasIdentifier =
-    /<input[^>]+(?:name|id)=["']?(?:j_)?(?:user(?:name|id)?|email|e?mail|login|account|benutzer|utilisateur|usuario|correo)/i.test(
+  // ---- 1. A machine-readable deny envelope. -----------------------------------------
+  // A 200 carrying {"error":"unauthorized"} is a denial that happens to have the wrong
+  // status code. Treating it as the resource made every URL compare equal and fabricated
+  // criticals.
+  if (isJsonBody(head)) {
+    return /["'](?:error|message|detail|code)["']\s*:\s*["'][^"']*(?:unauthor|unauthenticated|forbidden|not_?logged|login_?required|invalid_?token|expired)/i.test(
       head,
     );
-  const saysSignIn =
-    /(?:sign\s?in|log\s?in|log\s?on|sign\s?on|anmelden|connexion|iniciar sesi)/i.test(head);
-
-  // ---- 2. Is this page a GATE, or a page that merely contains a password field? ------
-  // The distinguishing question is what the form is FOR, so look at the submit control and
-  // the surrounding wording rather than at unrelated page furniture.
-  const submitSaysSignIn =
-    /<(?:button|input)[^>]*(?:value=["'][^"']*(?:sign\s?in|log\s?in|anmelden|connexion)|>\s*(?:sign\s?in|log\s?in|log\s?on|anmelden|connexion))/i.test(
-      head,
-    );
-  const formActionIsAuth =
-    /<form[^>]+action=["'][^"']*(?:login|signin|sign-in|authenticate|session|auth|sso)\b/i.test(head);
-
-  // Wording that only appears when the page's JOB is something else. Deliberately narrow:
-  // "sign up" and "new user" are NOT here, because a login page links to both.
-  const isChangePassword = /current password|old password|confirm new password|change (?:your )?password/i.test(head);
-  const isSettingsPage = /account settings|profile settings|notification settings|billing settings/i.test(head);
-  const isAdminCreate = /\b(?:new|create|add|edit)\s+(?:user|member|admin)\b|name=["']?role["']?/i.test(head);
-  const isSignupPage =
-    /(?:create|register)\s+(?:your\s+)?(?:a\s+|an\s+)?(?:new\s+)?account|already have an account|confirm password/i.test(
-      head,
-    );
-
-  // ---- 3. Positive: a credential form whose purpose is authentication. ---------------
-  if (hasPasswordInput && (submitSaysSignIn || formActionIsAuth)) return true;
-
-  // Password + identifier + sign-in wording, PROVIDED the page is not plainly something
-  // else. A change-password form and an admin create-user form both match the first three.
-  if (hasPasswordInput && hasIdentifier && saysSignIn) {
-    if (isChangePassword || isSettingsPage || isAdminCreate || isSignupPage) return false;
-    return true;
   }
 
-  // ---- 4. Passwordless gates: magic link, SSO only. ----------------------------------
+  // ---- 2. An explicit interstitial, but only on a page that is ONLY that. -----------
+  // "Sign in to continue using Acme Cloud after July 1" is an article headline. The rule
+  // fired on prose because it never asked how much else was on the page.
+  const textLen = visibleTextLength(head);
+  // 150, measured, not guessed. A real deny interstitial is a sentence and a link: the
+  // "You must log in to view this page" shape is 48 characters. An article whose HEADLINE
+  // happens to read "Sign in to continue using Acme Cloud after July 1" came to 509, and a
+  // 600 threshold classified it as a gate - dropping the page from the scan and reporting
+  // the run as clean.
+  const isTerse = textLen < 150;
+  if (isTerse) {
+    if (/you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head)) return true;
+    if (/(?:please\s+)?(?:log\s?in|sign\s?in) to (?:view|continue|access)/i.test(head)) return true;
+    if (/your session has (?:expired|timed out)|session expired/i.test(head)) return true;
+    if (/401\s*(?:-|:)?\s*(?:unauthorized|authorization required)/i.test(head)) return true;
+  }
+
+  // ---- 3. Structure. ----------------------------------------------------------------
+  const hasCredentialInput = CREDENTIAL_INPUT.test(head);
+  const hasIdentifier = IDENTIFIER_INPUT.test(head);
+  const authAction = AUTH_ACTION.test(head);
+  const operationAction = OPERATION_ACTION.test(head);
+  const appChrome = APP_CHROME.test(head);
+
+  // A registration form has the same structure as a sign-in form - identifier plus
+  // password, no app chrome - so structure alone cannot separate them. A second password
+  // field, or wording that only a signup page carries, can.
+  const isSignup =
+    /<input[^>]+(?:name|id)=["']?(?:password_?confirmation|confirm_?password|password2)/i.test(head) ||
+    /autocomplete=["']new-password["']/i.test(head) ||
+    /(?:create|register)\s+(?:your\s+)?(?:a\s+|an\s+)?(?:new\s+)?account|already have an account|sign\s?up\s+(?:for|to)\b/i.test(
+      head,
+    );
+
+  // A form posting to an auth route is a gate in any language, whatever the button says.
+  // This is what catches a two-step identifier page (Next) and an OTP step (Verify).
+  if (authAction && (hasCredentialInput || hasIdentifier)) return true;
+
+  // A credential input with an identifier and no application furniture around it. Covers a
+  // login page in a script none of the vocabulary knows.
+  if (hasCredentialInput && hasIdentifier && !appChrome && !operationAction && !isSignup) return true;
+
+  // A lone credential input - a PIN pad, an OTP step - on a page that is nothing else.
+  if (hasCredentialInput && !operationAction && !appChrome && !isSignup && isTerse) return true;
+
+  // ---- 4. Passwordless gates. --------------------------------------------------------
+  const saysSignIn =
+    /(?:sign\s?in|log\s?in|log\s?on|sign\s?on|anmelden|connexion|iniciar sesi|entrar)/i.test(head);
   const passwordless =
     /magic link|email me a (?:login )?link|(?:login|sign-?in) link|one-?time (?:code|password|link)|continue with (?:google|github|apple|microsoft|sso)|single sign-?on|\bsso\b/i.test(
       head,
     );
-  if (saysSignIn && passwordless) {
-    // A docs or integrations page describing SSO is not a gate. A gate has a form.
-    const hasForm = /<form|<input/i.test(head);
-    const isDocs = /documentation|integration|how to|guide|tutorial|\bdocs\b/i.test(head);
-    if (hasForm && !isDocs) return true;
-  }
-
-  // ---- 5. A bare password prompt (PIN / lock screen) on a small page. ----------------
-  // Requires sign-in wording too: a small internal page with a webhook-secret field is a
-  // resource, and suppressing it hides real findings.
-  if (hasPasswordInput && !hasIdentifier && saysSignIn && head.length < 8_000) {
-    if (isChangePassword || isSettingsPage || isAdminCreate) return false;
-    return true;
+  if (saysSignIn && passwordless && /<form|<input/i.test(head)) {
+    // A docs page describing SSO is not a gate.
+    if (!/documentation|integration guide|how to|tutorial|\bdocs\b/i.test(head)) return true;
   }
 
   return false;
@@ -191,7 +225,20 @@ const MIN_CONTENT_CHARS = 40;
  */
 export function hasRealContent(body: string): boolean {
   if (visibleTextLength(body) >= MIN_CONTENT_CHARS) return true;
-  return /<(?:input|button|select|textarea|table|form)\b/i.test(body);
+
+  // A JSON API response is content no matter how short. `{"balance":128455.12}` is 22
+  // characters and is the single most likely place a real IDOR lives; the text-length rule
+  // classified it as an empty shell and dropped the endpoint from the scan entirely.
+  const t = body.trim();
+  if ((t.startsWith("{") || t.startsWith("[")) && /["']\w+["']\s*:|^\[\s*[{"\d]/.test(t.slice(0, 2000))) {
+    return true;
+  }
+
+  // Interactive controls count: a real admin form - heading, three inputs, a button - can
+  // carry under 40 characters of prose. `<form` is deliberately NOT in this list: an SPA
+  // shell routinely ships a static login or search form before hydrating, and counting that
+  // as content is how a shell starts comparing equal for every identity.
+  return /<(?:input|button|select|textarea|table)\b/i.test(body);
 }
 
 /**
@@ -326,8 +373,6 @@ async function main(): Promise<void> {
   // Remove any previous verdict FIRST. Two earlier exit paths do not write a status file,
   // and nothing deleted the old one - so a stale "clean" survived and report.html presented
   // it as the current run. An absent file renders as "no scan", which is honest.
-  rmSync(resolve(OUT, "authz-status.json"), { force: true });
-
   const pages = readAuthPages();
   if (pages.length === 0) {
     console.error(
@@ -336,6 +381,15 @@ async function main(): Promise<void> {
     );
     process.exit(1);
   }
+
+  // Retire the previous verdict only once this run is certain to produce its own.
+  //
+  // Deleting it at the top of main() meant a run that could not start - no pages.auth.jsonl,
+  // expired session, wrong working directory - ERASED a valid earlier result, and the report
+  // then showed "no authorization scan" for a project that had one. That is worse than the
+  // stale-verdict bug it replaced: mislabelling a real result is recoverable, destroying the
+  // evidence on an operator error is not.
+  rmSync(resolve(OUT, "authz-status.json"), { force: true });
 
   const targets = candidates(pages, cfg);
   console.log(`Cross-user authorization scan`);

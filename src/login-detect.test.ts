@@ -150,3 +150,105 @@ test("an un-hydrated SPA shell is neither a login page nor a reached resource", 
   // hasContent is what denies it: a 200 with no text proves nothing either way.
   assert.equal(reachedResource(classify(200, shell)), false);
 });
+
+// =============================================================== round-8 audit
+//
+// The fixtures above were written from the classifier's own vocabulary, so they could not
+// fail for any shape the classifier did not already know. These came from an audit that
+// reconstructed real pages, and every one of them was WRONG before this round.
+
+const REAL_LOGIN: [string, string][] = [
+  [
+    "two-step identifier page, submit says Next (Google/Okta shape)",
+    page("Sign in", `<h1>Sign in</h1><form action="/signin/v1/lookup" method="post">
+      <input type="email" name="identifier" autocomplete="username">
+      <button><span>Next</span></button></form>`),
+  ],
+  [
+    "OTP second step, submit says Verify",
+    page("Verify", `<h1>Enter the code we sent you</h1><form action="/signin/challenge/otp">
+      <input name="otp" autocomplete="one-time-code" inputmode="numeric">
+      <button>Verify</button></form>`),
+  ],
+  [
+    "Arabic login, no Latin auth vocabulary at all",
+    page("دخول", `<h1>تسجيل الدخول</h1><form action="/dukhul" method="post">
+      <label>البريد الإلكتروني</label><input name="email" type="email">
+      <label>كلمة المرور</label><input name="password" type="password">
+      <button>متابعة</button></form>`),
+  ],
+  [
+    "Russian login, no Latin auth vocabulary",
+    page("Вход", `<h1>Вход в систему</h1><form action="/vhod" method="post">
+      <input name="email" type="email"><input name="password" type="password">
+      <button>Продолжить</button></form>`),
+  ],
+  [
+    "Japanese login, no Latin auth vocabulary",
+    page("ログイン", `<h1>ログイン</h1><form action="/ninshou" method="post">
+      <input name="username"><input name="password" type="password">
+      <button>次へ</button></form>`),
+  ],
+  [
+    "a 200 carrying a JSON unauthorized envelope",
+    `{"error":"unauthorized","message":"Authentication required","status":401}`,
+  ],
+  [
+    "a terse 401 page",
+    page("401", `<h1>401 Authorization Required</h1><p>nginx</p>`),
+  ],
+];
+
+for (const [label, body] of REAL_LOGIN) {
+  test(`login (round 8): ${label}`, () => {
+    assert.equal(looksLikeLoginPage(body), true, "missed a login page - this FABRICATES criticals");
+    assert.equal(reachedResource(classify(200, body)), false);
+  });
+}
+
+const REAL_RESOURCES: [string, string][] = [
+  [
+    "an article whose headline happens to say 'Sign in to continue'",
+    page("Changes", `<h1>Sign in to continue using Acme Cloud after July 1</h1>
+      <p>From July we are consolidating accounts. Existing customers keep their data and
+      nothing is deleted; you will simply be asked to authenticate once per device.</p>
+      <p>The migration runs in three phases across the summer, and each phase is announced
+      two weeks ahead on this page and by email to workspace administrators.</p>
+      <p>If you administer more than one workspace you will need to repeat the step for each,
+      because workspace identities remain separate by design.</p>`),
+  ],
+  [
+    "a two-factor security page that asks for a password to DISABLE 2FA",
+    page("Two-factor authentication", `<h1>Two-factor authentication</h1>
+      <p>You will be asked for a code when you sign in on a new device.</p>
+      <form action="/settings/2fa/disable"><input type="password" name="password">
+      <button>Turn off</button></form>`),
+  ],
+  [
+    "a small JSON API response - where IDORs actually live",
+    `{"balance":128455.12,"acct":"***4417"}`,
+  ],
+  [
+    "an API token page (bare password field, but an operation action)",
+    page("API tokens", `<h1>API tokens</h1><a href="/logout">Log out</a>
+      <form action="/settings/tokens/revoke"><input type="password" name="password">
+      <button>Revoke all</button></form>`),
+  ],
+];
+
+for (const [label, body] of REAL_RESOURCES) {
+  test(`resource (round 8): ${label}`, () => {
+    assert.equal(looksLikeLoginPage(body), false, "suppressed a real page - this reports false CLEAN");
+    assert.equal(reachedResource(classify(200, body)), true);
+  });
+}
+
+test("an SPA shell that ships a static form is still not content", () => {
+  // `<form` was briefly counted as content, which let a pre-hydration shell compare equal
+  // for every identity - the fabrication path again, by a different route.
+  const shell = page("App", `<div id="root"><form action="/search"><input name="q"></form></div>`);
+  assert.equal(reachedResource(classify(200, shell)), true); // has an <input>, so it IS content
+  // ...but the shell with no controls at all is not:
+  const bare = page("App", `<div id="root"></div><script src="/app.js"></script>`);
+  assert.equal(reachedResource(classify(200, bare)), false);
+});

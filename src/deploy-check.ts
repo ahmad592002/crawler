@@ -527,7 +527,11 @@ async function main(): Promise<void> {
   console.log(`  ${probeFindings.length} exposed\n`);
 
   const pages = readPages();
-  const history = existsSync(resolve(OUT, "http-history.jsonl")) ? readHistory() : [];
+  // readHistory() with no argument merges every capture that exists and returns [] when
+  // none do, so it needs no guard. Asking existsSync about the ANONYMOUS path meant that
+  // after `npm run crawl:auth` alone the header audit was skipped and the tool advised
+  // "enable captureHttpHistory and re-crawl" - while the capture sat on disk.
+  const history = readHistory();
   if (pages.length === 0 && history.length === 0) {
     console.log("No crawl data found - run `npm run crawl` first for the content scan.\n");
   }

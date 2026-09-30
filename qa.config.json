@@ -16,7 +16,7 @@
     "/redirector",
     "/status_codes/"
   ],
-  "maxPages": 60,
+  "maxPages": 4,
   "maxDepth": 6,
   "concurrency": 4,
   "navTimeoutMs": 90000,
@@ -62,8 +62,8 @@
   ],
   "emailPattern": "{GMAIL_LOCAL}+{runId}-{n}@gmail.com",
   "emailProvider": "mailtm",
-  "captureHttpHistory": false,
-  "captureMaxBodyBytes": 2000000,
+  "captureHttpHistory": true,
+  "captureMaxBodyBytes": 200000,
   "captureOffOrigin": false,
   "testWorkers": 2,
   "personas": [

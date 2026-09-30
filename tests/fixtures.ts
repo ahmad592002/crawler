@@ -193,6 +193,26 @@ async function guardedClick(page: Page, role: "button" | "link", name: string | 
     // the ancestor anchor every candidate was empty and the guard waved it through.
     (el.closest("a") as HTMLAnchorElement | null)?.href ?? "",
     el.closest("a")?.textContent ?? "",
+    // A router link, an inline handler, and a label that activates a control elsewhere:
+    // three ways the destructive target sits on none of self, form or anchor. A <label
+    // for=x> click activates x per the HTML spec while the label text says "Confirm".
+    el.getAttribute("onclick") ?? "",
+    el.getAttribute("data-href") ?? "",
+    el.getAttribute("data-url") ?? "",
+    el.getAttribute("data-action") ?? "",
+    el.closest("[role=link]")?.getAttribute("href") ?? "",
+    (() => {
+      const target = el.getAttribute("for") ?? el.getAttribute("aria-controls");
+      if (!target) return "";
+      const ctl = document.getElementById(target);
+      if (!ctl) return "";
+      return [
+        ctl.getAttribute("aria-label") ?? "",
+        ctl.textContent ?? "",
+        ctl.getAttribute("value") ?? "",
+        ctl.getAttribute("formaction") ?? "",
+      ].join(" ");
+    })(),
   ]);
 
   for (const candidate of candidates) {
@@ -247,6 +267,26 @@ export async function safeClickLocator(
     // the ancestor anchor every candidate was empty and the guard waved it through.
     (el.closest("a") as HTMLAnchorElement | null)?.href ?? "",
     el.closest("a")?.textContent ?? "",
+    // A router link, an inline handler, and a label that activates a control elsewhere:
+    // three ways the destructive target sits on none of self, form or anchor. A <label
+    // for=x> click activates x per the HTML spec while the label text says "Confirm".
+    el.getAttribute("onclick") ?? "",
+    el.getAttribute("data-href") ?? "",
+    el.getAttribute("data-url") ?? "",
+    el.getAttribute("data-action") ?? "",
+    el.closest("[role=link]")?.getAttribute("href") ?? "",
+    (() => {
+      const target = el.getAttribute("for") ?? el.getAttribute("aria-controls");
+      if (!target) return "";
+      const ctl = document.getElementById(target);
+      if (!ctl) return "";
+      return [
+        ctl.getAttribute("aria-label") ?? "",
+        ctl.textContent ?? "",
+        ctl.getAttribute("value") ?? "",
+        ctl.getAttribute("formaction") ?? "",
+      ].join(" ");
+    })(),
   ]);
 
   for (const candidate of [...candidates, options?.label ?? ""]) {

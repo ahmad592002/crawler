@@ -434,8 +434,22 @@ export function toBurpXml(items: HttpExchange[]): string {
   return `${head}${body}</items>\n`.replace(/\r?\n/g, "\r\n");
 }
 
-export function writeBurpXml(file = HISTORY_XML): number {
-  const items = readHistory();
-  writeFileSync(file, toBurpXml(items));
+/**
+ * Serialize a capture to Burp XML.
+ *
+ * `mode` selects WHICH capture. This is not cosmetic: the previous version always merged
+ * every capture file into one XML, so `npm run crawl` - an anonymous crawl - produced a file
+ * containing every authenticated exchange, cookies included. The per-mode JSONL split was
+ * defeated at the export step, and CLAUDE.md treats these files as secret-bearing.
+ *
+ * Items are ordered by time, because proxy history is chronological and a merge in file
+ * order produced a descending sequence whenever the auth crawl ran first.
+ */
+export function writeBurpXml(mode: "anon" | "auth" | "all" = "all", file?: string): number {
+  const sources = mode === "all" ? historyFiles() : [historyJsonl(mode)];
+  const items = sources
+    .flatMap((f) => readHistory(f))
+    .sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+  writeFileSync(file ?? historyXml(mode), toBurpXml(items));
   return items.length;
 }
