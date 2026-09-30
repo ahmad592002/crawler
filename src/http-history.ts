@@ -243,7 +243,7 @@ export function recordHistory(context: BrowserContext, cfg: QaConfig, opts: Reco
           ...(res.truncated ? { truncated: true, fullBodyLength: res.fullBodyLength } : {}),
         };
 
-        appendFileSync(HISTORY_JSONL, `${JSON.stringify(exchange)}\n`);
+        appendFileSync(target, `${JSON.stringify(exchange)}\n`);
       } catch {
         // A single unreadable exchange must never interrupt the crawl.
       }
@@ -339,7 +339,15 @@ function num(value: unknown, fallback = 0): number {
   return Number.isFinite(n) ? Math.trunc(n) : fallback;
 }
 
-export function readHistory(file = HISTORY_JSONL): HttpExchange[] {
+export function readHistory(file?: string): HttpExchange[] {
+  // With no argument, read EVERY capture file. Defaulting to the anonymous path meant an
+  // authenticated capture exported as an empty history - and this merge was claimed in a
+  // commit before it existed, because the edit that was supposed to add it failed silently.
+  if (file === undefined) return historyFiles().flatMap((f) => readHistory(f));
+  return readHistoryFile(file);
+}
+
+function readHistoryFile(file: string): HttpExchange[] {
   if (!existsSync(file)) return [];
   const out: HttpExchange[] = [];
   for (const line of readFileSync(file, "utf8").split("\n")) {

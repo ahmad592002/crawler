@@ -189,6 +189,10 @@ async function guardedClick(page: Page, role: "button" | "link", name: string | 
     (el as HTMLAnchorElement).href ?? "",
     el.getAttribute("formaction") ?? "",
     el.closest("form")?.getAttribute("action") ?? "",
+    // An icon inside <a href="/account/delete"> has no attributes of its own, so without
+    // the ancestor anchor every candidate was empty and the guard waved it through.
+    (el.closest("a") as HTMLAnchorElement | null)?.href ?? "",
+    el.closest("a")?.textContent ?? "",
   ]);
 
   for (const candidate of candidates) {
@@ -239,6 +243,10 @@ export async function safeClickLocator(
     (el as HTMLAnchorElement).href ?? "",
     el.getAttribute("formaction") ?? "",
     el.closest("form")?.getAttribute("action") ?? "",
+    // An icon inside <a href="/account/delete"> has no attributes of its own, so without
+    // the ancestor anchor every candidate was empty and the guard waved it through.
+    (el.closest("a") as HTMLAnchorElement | null)?.href ?? "",
+    el.closest("a")?.textContent ?? "",
   ]);
 
   for (const candidate of [...candidates, options?.label ?? ""]) {

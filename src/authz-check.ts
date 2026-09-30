@@ -59,52 +59,85 @@ export interface Probe {
  * either: it must sit in a form that also takes an identifier, and the page must be small
  * enough to plausibly BE a sign-in page rather than an application screen containing one.
  */
+/**
+ * Replacement for looksLikeLoginPage.
+ *
+ * The bug that has now shipped twice: negative signals ("this looks like a settings page")
+ * were evaluated BEFORE the positive test, and returned false unconditionally. Since a real
+ * consumer login page almost always carries a sign-up link, and an enterprise one often
+ * sits in a layout with a logout link, one negative match disarmed the whole classifier -
+ * and a missed login page is not a harmless miss: the owner's expired session then compares
+ * equal to an anonymous request on every URL, which FABRICATES critical findings.
+ *
+ * The order is therefore: interstitial, then the positive form test, and only then the
+ * negative signals - which now only run when the positive test did NOT fire, to separate a
+ * settings page (has a password field, is not a gate) from a login page.
+ */
 export function looksLikeLoginPage(body: string): boolean {
   const head = body.slice(0, 60_000);
 
   // ---- 1. An explicit "you are not allowed in" interstitial. -------------------------
-  // Checked FIRST and with no other precondition. Gating this behind a password input made
-  // it dead code, and it is the single most common shape an expired session produces: a
-  // sentence, a link, and no form at all. Missing it meant every page on the site compared
-  // equal for the owner and a stranger, which FABRICATED critical findings.
   if (/you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head)) return true;
   if (/(?:please\s+)?(?:log\s?in|sign\s?in) to (?:view|continue|access)/i.test(head)) return true;
   if (/your session has (?:expired|timed out)|session expired/i.test(head)) return true;
 
-  // ---- 2. Signals that this is a real application page, not a gate. ------------------
-  // Evaluated before the positive form checks, because a settings page, a signup page and
-  // an admin create-user form all carry an identifier field and a password field, and
-  // suppressing those is how the previous version lost the scanner's best findings.
-  const hasLogout = /(?:sign|log)\s?out\b|href=["'][^"']*logout/i.test(head);
-  const isSignup = /(?:create|register)\s+(?:your\s+)?(?:an?\s+)?account|sign\s?up\b|already have an account/i.test(head);
-  const isSettings = /account settings|change (?:your )?password|current password|new password|profile settings/i.test(head);
-  const isAdminForm = /\b(?:new|create|add|edit)\s+(?:user|member|account|admin)\b|name=["']?role/i.test(head);
-  if (hasLogout || isSignup || isSettings || isAdminForm) return false;
-
-  // ---- 3. A sign-in form, in any of its shapes. --------------------------------------
   const hasPasswordInput = /<input[^>]+type=["']?password/i.test(head);
-  // Identifier vocabulary covers non-English and framework conventions. j_username is
-  // Spring Security; benutzer/utilisateur/usuario cover the common localisations.
   const hasIdentifier =
-    /<input[^>]+(?:name|id)=["']?(?:j_)?(?:user(?:name|id)?|email|e?mail|login|account|benutzer|utilisateur|usuario|correo)/i.test(head);
+    /<input[^>]+(?:name|id)=["']?(?:j_)?(?:user(?:name|id)?|email|e?mail|login|account|benutzer|utilisateur|usuario|correo)/i.test(
+      head,
+    );
   const saysSignIn =
     /(?:sign\s?in|log\s?in|log\s?on|sign\s?on|anmelden|connexion|iniciar sesi)/i.test(head);
 
-  // Password + identifier is a login form regardless of page size. The old `short` gate
-  // meant a branded enterprise login page over 12 KB was treated as a resource.
-  if (hasPasswordInput && hasIdentifier) return true;
-
-  // Passwordless: magic-link and SSO-only pages have no password field at all. Require a
-  // sign-in phrase AND a passwordless affordance, so an ordinary page that merely says
-  // "log in" in a nav link does not qualify.
-  const passwordless =
-    /magic link|email me a link|(?:login|sign-?in) link|one-?time (?:code|password|link)|continue with (?:google|github|apple|microsoft|sso)|single sign-?on|\bsso\b/i.test(
+  // ---- 2. Is this page a GATE, or a page that merely contains a password field? ------
+  // The distinguishing question is what the form is FOR, so look at the submit control and
+  // the surrounding wording rather than at unrelated page furniture.
+  const submitSaysSignIn =
+    /<(?:button|input)[^>]*(?:value=["'][^"']*(?:sign\s?in|log\s?in|anmelden|connexion)|>\s*(?:sign\s?in|log\s?in|log\s?on|anmelden|connexion))/i.test(
       head,
     );
-  if (saysSignIn && passwordless) return true;
+  const formActionIsAuth =
+    /<form[^>]+action=["'][^"']*(?:login|signin|sign-in|authenticate|session|auth|sso)\b/i.test(head);
 
-  // A password field with no identifier at all (a PIN or lock screen) on a small page.
-  if (hasPasswordInput && head.length < 8_000) return true;
+  // Wording that only appears when the page's JOB is something else. Deliberately narrow:
+  // "sign up" and "new user" are NOT here, because a login page links to both.
+  const isChangePassword = /current password|old password|confirm new password|change (?:your )?password/i.test(head);
+  const isSettingsPage = /account settings|profile settings|notification settings|billing settings/i.test(head);
+  const isAdminCreate = /\b(?:new|create|add|edit)\s+(?:user|member|admin)\b|name=["']?role["']?/i.test(head);
+  const isSignupPage =
+    /(?:create|register)\s+(?:your\s+)?(?:a\s+|an\s+)?(?:new\s+)?account|already have an account|confirm password/i.test(
+      head,
+    );
+
+  // ---- 3. Positive: a credential form whose purpose is authentication. ---------------
+  if (hasPasswordInput && (submitSaysSignIn || formActionIsAuth)) return true;
+
+  // Password + identifier + sign-in wording, PROVIDED the page is not plainly something
+  // else. A change-password form and an admin create-user form both match the first three.
+  if (hasPasswordInput && hasIdentifier && saysSignIn) {
+    if (isChangePassword || isSettingsPage || isAdminCreate || isSignupPage) return false;
+    return true;
+  }
+
+  // ---- 4. Passwordless gates: magic link, SSO only. ----------------------------------
+  const passwordless =
+    /magic link|email me a (?:login )?link|(?:login|sign-?in) link|one-?time (?:code|password|link)|continue with (?:google|github|apple|microsoft|sso)|single sign-?on|\bsso\b/i.test(
+      head,
+    );
+  if (saysSignIn && passwordless) {
+    // A docs or integrations page describing SSO is not a gate. A gate has a form.
+    const hasForm = /<form|<input/i.test(head);
+    const isDocs = /documentation|integration|how to|guide|tutorial|\bdocs\b/i.test(head);
+    if (hasForm && !isDocs) return true;
+  }
+
+  // ---- 5. A bare password prompt (PIN / lock screen) on a small page. ----------------
+  // Requires sign-in wording too: a small internal page with a webhook-secret field is a
+  // resource, and suppressing it hides real findings.
+  if (hasPasswordInput && !hasIdentifier && saysSignIn && head.length < 8_000) {
+    if (isChangePassword || isSettingsPage || isAdminCreate) return false;
+    return true;
+  }
 
   return false;
 }
@@ -114,7 +147,7 @@ export function classify(status: number, body: string): Probe {
     status,
     length: body.length,
     looksLikeLogin: looksLikeLoginPage(body),
-    hasContent: visibleTextLength(body) >= MIN_CONTENT_CHARS,
+    hasContent: hasRealContent(body),
   };
 }
 
@@ -149,6 +182,19 @@ export function visibleTextLength(body: string): number {
 const MIN_CONTENT_CHARS = 40;
 
 /**
+ * Is there anything here at all?
+ *
+ * Visible text alone is the wrong measure: a real admin form - a heading, three inputs and
+ * a button - can carry under 40 characters of prose while being exactly the resource this
+ * scanner most wants to report as reachable. Interactive controls count as content; an
+ * un-hydrated SPA shell has neither text nor controls, which is what distinguishes it.
+ */
+export function hasRealContent(body: string): boolean {
+  if (visibleTextLength(body) >= MIN_CONTENT_CHARS) return true;
+  return /<(?:input|button|select|textarea|table|form)\b/i.test(body);
+}
+
+/**
  * Compare two successful responses. Near-identical length means the second identity got
  * the same page, not a trimmed "you have no access to this" variant.
  */
@@ -172,8 +218,23 @@ export function similarity(a: Probe, b: Probe): number {
   return Math.min(a.length, b.length) / Math.max(a.length, b.length);
 }
 
-/** Below this a near-miss is not worth reporting; above SAME it is a finding outright. */
-export const NEAR_MISS_FLOOR = 0.5;
+/**
+ * Floor for reporting a near-miss.
+ *
+ * 0.5 was far too low. similarity() is a BYTE-LENGTH RATIO - two unrelated pages of similar
+ * size score 1.0 - so on a site with a personalised nav, where the same page differs 0-45%
+ * between users, roughly four comparisons in five landed in the band. With 48 templates and
+ * two personas that is ~76 unactionable "needs a human" findings per run, which is how the
+ * whole Z-class gets ignored, genuine criticals included.
+ *
+ * 0.8 keeps the case the band exists for - the other user sees the same record minus the
+ * owner's edit controls and banner - while excluding pages that merely happen to be a
+ * similar size.
+ */
+export const NEAR_MISS_FLOOR = 0.8;
+
+/** At most this many near-misses per run. Beyond it they are summarised, not enumerated. */
+const MAX_NEAR_MISSES = 5;
 
 async function probe(ctx: APIRequestContext, url: string, timeoutMs: number): Promise<Probe | null> {
   try {
@@ -262,6 +323,11 @@ async function main(): Promise<void> {
   const personas = knownPersonas().filter((p) => existsSync(p.statePath));
   const timeoutMs = Math.min(cfg.navTimeoutMs, 30_000);
 
+  // Remove any previous verdict FIRST. Two earlier exit paths do not write a status file,
+  // and nothing deleted the old one - so a stale "clean" survived and report.html presented
+  // it as the current run. An absent file renders as "no scan", which is honest.
+  rmSync(resolve(OUT, "authz-status.json"), { force: true });
+
   const pages = readAuthPages();
   if (pages.length === 0) {
     console.error(
@@ -303,7 +369,10 @@ async function main(): Promise<void> {
   // Suppression must be visible. A template skipped because its baseline was unreachable,
   // or because it was classified as a login page, is a template that was NOT checked - and
   // printing only "no problems found" made those indistinguishable from a clean result.
-  const ledger = { compared: 0, baselineUnreachable: 0, classifiedLogin: 0 };
+  const ledger = { compared: 0, baselineUnreachable: 0, classifiedLogin: 0, ownerDenied: 0 };
+  // Capped so a personalised-nav site cannot bury the criticals under near-misses.
+  let nearMisses = 0;
+  let nearMissesSuppressed = 0;
 
   // A probe that throws returns null and is skipped. Counting those is not bookkeeping:
   // with DNS down, every probe failed and this scan printed "No cross-user access problems
@@ -386,7 +455,10 @@ async function main(): Promise<void> {
             actual: `HTTP ${p.status}, ${p.length} bytes vs ${base!.length} - ${pct}% alike, effectively the same page`,
             source: "authz",
           });
+        } else if (ratio >= NEAR_MISS_FLOOR && nearMisses >= MAX_NEAR_MISSES) {
+          nearMissesSuppressed++;
         } else if (ratio >= NEAR_MISS_FLOOR) {
+          nearMisses++;
           // Reported rather than discarded. A partial match is what a real IDOR looks like
           // when the other user sees the same record without the owner's edit controls or
           // banner - the case the old boolean threw away with no record at all.
@@ -437,6 +509,7 @@ async function main(): Promise<void> {
         classifiedLogin: ledger.classifiedLogin,
         probesAttempted: attempted,
         probesFailed: unreachable,
+        nearMissesSuppressed,
         personas: personas.map((p) => p.id),
         sharedIdentity: shared,
         verdict:
@@ -458,6 +531,13 @@ async function main(): Promise<void> {
         `  Fix connectivity and re-run before trusting any authorization conclusion.`,
     );
     process.exit(2);
+  }
+  if (nearMissesSuppressed > 0) {
+    console.log(
+      `  note: ${nearMissesSuppressed} further near-miss comparison(s) were not reported. ` +
+        `Similarity is a byte-length ratio, so a personalised page can look alike without ` +
+        `sharing data - review the ${MAX_NEAR_MISSES} reported first.`,
+    );
   }
   if (unreachable > 0) {
     console.log(`  note: ${unreachable} of ${attempted} requests failed and were skipped.`);

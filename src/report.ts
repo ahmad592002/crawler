@@ -89,6 +89,16 @@ function num(v: unknown, fallback = 0): number {
 const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
 const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.map(str) : []);
 
+/**
+ * A list of strings from a value that MIGHT be a bare string.
+ *
+ * A hand-written or truncated status file can carry "personas": "alice". strArr() returns
+ * [] for that, which is safe but silently loses the value; the previous code used ?? [],
+ * which crashed the entire report. Coerce instead.
+ */
+const strList = (v: unknown): string[] =>
+  Array.isArray(v) ? v.map(str) : typeof v === "string" && v ? [v] : [];
+
 function normalizePage(p: Partial<PageRecord>): PageRecord {
   // Every field is coerced to its declared type, not merely defaulted. `?? 0` on a value
   // that is a string leaves the string in place, and the templates below interpolate
@@ -440,7 +450,7 @@ ${
          <td>${num(authz.compared)} of ${num(authz.templates)}</td>
          <td>${num(authz.baselineUnreachable)} unreachable, ${num(authz.classifiedLogin)} login page</td>
          <td>${num(authz.probesFailed)} failed of ${num(authz.probesAttempted)}</td>
-         <td>${esc((authz.personas ?? []).join(", ") || "none")}</td>
+         <td>${esc(strList(authz.personas).join(", ") || "none")}</td>
        </tr></tbody></table></div>
        ${
          authz.verdict === "inconclusive"
@@ -450,8 +460,8 @@ ${
            : ""
        }
        ${
-         (authz.sharedIdentity ?? []).length > 1
-           ? `<p class="sub" style="margin-top:10px">${esc((authz.sharedIdentity ?? []).join(" and "))}
+         strList(authz.sharedIdentity).length > 1
+           ? `<p class="sub" style="margin-top:10px">${esc(strList(authz.sharedIdentity).join(" and "))}
               share one account, so the user-to-user comparison was skipped. Give each persona its
               own account on the target.</p>`
            : ""
