@@ -73,9 +73,8 @@ const NOT_A_LOCATOR_CLICK = new RegExp(
     // A CSS class or selector that merely starts with "click".
     String.raw`\.click[-_][\w-]+`,
     String.raw`class~?=["'][^"']*click`,
-    // Anything inside evaluate/evaluateAll runs IN THE PAGE, where the fixture does not
-    // exist. There is no guarded form, so flagging it only teaches people to ignore the rule.
-    String.raw`\.evaluate(?:All|Handle)?\s*\(`,
+    // evaluate() is NOT here. Its whole call is removed by stripEvaluateCalls first,
+    // because deleting only the token would leave the in-page body - and its click - behind.
   ].join("|"),
 );
 
@@ -112,9 +111,7 @@ test("no spec performs an unguarded click", () => {
       // bracket notation, and taking a REFERENCE to click (`.click.bind(x)`, `= x.click`)
       // to call later. A trailing `.click` not followed by `(` covers every reference form,
       // including ones behind a call like `page.locator("#x").click`.
-      if (!UNGUARDED_CLICK.test(line)) return;
-      // Not a Locator click - no guard exists or is needed.
-      if (NOT_A_LOCATOR_CLICK.test(line)) return;
+      if (!isUnguardedClick(line)) return;
       // The guarded helpers are the only sanctioned way to click.
       if (GUARDED.test(line)) return;
       // submitAndWait takes a click PROMISE, so a guarded click inside it is fine - but the
@@ -152,9 +149,46 @@ test("fixtures.ts exports a guarded path for every click shape", () => {
  * Exactly the rule the lint applies, so an evasion is tested against the real patterns
  * rather than a copy that can drift out of step with them.
  */
+/**
+ * Remove `…evaluate(…)` calls, parentheses balanced.
+ *
+ * Code inside evaluate runs in the page, where the fixture does not exist, so it cannot be
+ * guarded. Deleting only the `.evaluate(` token leaves the in-page body behind (and its
+ * `.click()` with it); exempting the whole line hides a real violation that follows the
+ * call on the same line. Removing the call and nothing else is the only option that is
+ * wrong in neither direction.
+ */
+function stripEvaluateCalls(line: string): string {
+  const re = /\.(?:evaluate|evaluateAll|evaluateHandle)\s*\(/g;
+  let out = line;
+  for (;;) {
+    re.lastIndex = 0;
+    const m = re.exec(out);
+    if (!m) return out;
+
+    let depth = 0;
+    let i = m.index + m[0].length - 1; // at the opening paren
+    for (; i < out.length; i++) {
+      if (out[i] === "(") depth++;
+      else if (out[i] === ")") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    // Unbalanced (the call continues on the next line): drop the rest of the line.
+    out = out.slice(0, m.index) + " " + (i < out.length ? out.slice(i + 1) : "");
+  }
+}
+
 function isUnguardedClick(line: string): boolean {
-  if (NOT_A_LOCATOR_CLICK.test(line)) return false;
-  return UNGUARDED_CLICK.test(line) && !GUARDED.test(line);
+  // Remove the exempt constructs, then judge what is LEFT. Exempting the whole line let a
+  // real violation shelter beside a safe one - a click on "Delete account" passed simply
+  // because the same line also mentioned an evaluate() or a `.click-me` selector.
+  const remainder = stripEvaluateCalls(line).replace(
+    new RegExp(NOT_A_LOCATOR_CLICK.source, "gi"),
+    " ",
+  );
+  return UNGUARDED_CLICK.test(remainder) && !GUARDED.test(remainder);
 }
 
 test("a comment mentioning safeClick does not exempt the code beside it", () => {
@@ -252,4 +286,26 @@ test("the lint really does recurse into nested spec directories", () => {
   rmSync(box, { recursive: true, force: true });
 
   assert.deepEqual(found.sort(), ["/generated/deep/low.setup.ts", "/generated/mid.spec.ts", "/top.spec.ts"]);
+});
+
+test("a real click hiding beside an exempt token is still caught", () => {
+  // Exempting the whole line meant a genuine violation could shelter next to a safe one.
+  for (const line of [
+    `await page.locator(".click-me").click();`,
+    `await page.evaluate(() => 1); await page.locator("#danger").click();`,
+    `await row.evaluateAll(() => {}); await page.getByRole("button", {name:"Delete"}).click();`,
+    `await page.mouse.move(1, 2); await page.locator("#danger").click();`,
+  ]) {
+    assert.equal(isUnguardedClick(line), true, `violation sheltered behind an exemption: ${line}`);
+  }
+});
+
+test("the exemptions still hold when nothing else is on the line", () => {
+  for (const line of [
+    `await page.mouse.click(120, 240);`,
+    `await page.locator(".click-me").waitFor();`,
+    `await page.evaluate(() => document.querySelector("#x")?.click());`,
+  ]) {
+    assert.equal(isUnguardedClick(line), false, `false positive: ${line}`);
+  }
 });

@@ -252,3 +252,74 @@ test("an SPA shell that ships a static form is still not content", () => {
   const bare = page("App", `<div id="root"></div><script src="/app.js"></script>`);
   assert.equal(reachedResource(classify(200, bare)), false);
 });
+
+// =============================================================== round-8 supplement
+//
+// Six shapes the round-8 FIX broke, four of them regressions against the version before
+// it. Every one is an authenticated page that was being dropped from the authorization
+// scan while the run still printed "no cross-user access problems found".
+
+const SUPPLEMENT_RESOURCES: [string, string][] = [
+  [
+    "active sessions page - action contains 'sessions', not a login",
+    page("Sessions", `<h1>Active sessions</h1>
+      <form action="/account/sessions" method="post">
+      <input type="hidden" name="email" value="alice@t.test">
+      <button>Revoke this device</button></form>`),
+  ],
+  [
+    "personal access tokens - action contains 'auth', not a login",
+    page("Tokens", `<h1>Personal access tokens</h1>
+      <form action="/auth/tokens"><input name="note"><input name="username" value="alice">
+      <button>Generate</button></form>`),
+  ],
+  [
+    "edit profile - autocomplete=username is not a credential",
+    page("Profile", `<h1>Edit profile</h1>
+      <form action="/account"><input name="username" autocomplete="username" value="alice">
+      <input name="bio"><button>Save</button></form>`),
+  ],
+  [
+    "JSON cart with an EXPIRED_COUPON code",
+    `{"code":"EXPIRED_COUPON","cartId":9912,"owner":"alice"}`,
+  ],
+  [
+    "JSON log entry mentioning login_required, carrying data",
+    `{"message":"user 44 hit login_required at 10:02","entries":[1,2,3]}`,
+  ],
+  [
+    "JSON subscription mentioning an expired card",
+    `{"subscription":{"status":"active"},"message":"card expired on file","id":77}`,
+  ],
+];
+
+for (const [label, body] of SUPPLEMENT_RESOURCES) {
+  test(`resource (supplement): ${label}`, () => {
+    assert.equal(looksLikeLoginPage(body), false, "suppressed a real page - reports false CLEAN");
+    assert.equal(reachedResource(classify(200, body)), true);
+  });
+}
+
+test("a genuine JSON denial is still detected", () => {
+  // The envelope rule must stay useful after being narrowed.
+  for (const body of [
+    `{"error":"unauthorized"}`,
+    `{"message":"Authentication required","status":401}`,
+    `{"detail":"Invalid token"}`,
+    `{"errors":"login_required"}`,
+  ]) {
+    assert.equal(looksLikeLoginPage(body), true, `missed a denial: ${body}`);
+  }
+});
+
+test("an Apache 401 body is a denial however long it runs", () => {
+  // The terse gate was tuned to two measured examples (48 and 509 chars); a stock Apache
+  // 401 page sits above it, and a proxy that serves that body with a 200 would otherwise
+  // manufacture a critical.
+  const apache = page("401 Unauthorized", `<h1>401 Unauthorized</h1>
+    <p>This server could not verify that you are authorized to access the document
+    requested. Either you supplied the wrong credentials (e.g., bad password), or your
+    browser doesn't understand how to supply the credentials required.</p>
+    <hr><address>Apache/2.4.58 (Ubuntu) Server at example.test Port 443</address>`);
+  assert.equal(looksLikeLoginPage(apache), true);
+});

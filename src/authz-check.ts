@@ -79,16 +79,43 @@ export interface Probe {
  */
 
 /** Auth-ish form actions, in the spellings real frameworks use. */
-const AUTH_ACTION =
-  /action=["'][^"']*(?:log[-_]?in|sign[-_]?in|signin|authenticate|auth\b|session|sso|saml|oauth|oidc|j_spring_security|wp-login|accounts\/login|dukhul|vhod|ninshou|connexion|anmeld)/i;
+/**
+ * A form action that means "sign in", matched on a path SEGMENT rather than a substring.
+ *
+ * Substring matching made `/account/sessions` (the active-devices page) and `/auth/tokens`
+ * (personal access tokens) read as login forms, because they contain "session" and "auth".
+ * Both are authenticated pages, and suppressing them is the report-a-false-clean direction.
+ * The segment must also be where the form POSTS TO - last, or followed by /new - which is
+ * what separates `/session` (sign in) from `/account/sessions` (manage them).
+ */
+const AUTH_ACTION = new RegExp(
+  // The token must be a WHOLE path segment: preceded by "/", and followed by "/", the end
+  // of the attribute, or a query. That is what keeps "/account/sessions" (plural - manage
+  // your devices) and "/auth/tokens" out, while "/signin/v1/lookup" and "/session" are in.
+  'action=["\'][^"\']*?/' +
+    "(?:log[-_]?in|sign[-_]?in|signin|signon|authenticate|session|sessions/new|sso|saml|" +
+    "j_spring_security_check|wp-login\\.php|dukhul|vhod|ninshou|connexion|anmelden)" +
+    '(?=[/?#"\'])',
+  "i",
+);
+
+/** OAuth/OIDC endpoints are gates too, but only the authorize step. */
+const OAUTH_ACTION = /action=["'][^"']*\/(?:oauth2?|oidc)\/(?:authorize|authenticate|token)\b/i;
 
 /** An action that plainly performs an operation on an existing account, not a sign-in. */
 const OPERATION_ACTION =
   /action=["'][^"']*(?:settings|preferences|profile|disable|enable|update|delete|remove|revoke|create|new|invite|webhook|billing|2fa|mfa)/i;
 
 /** Inputs that only appear on a sign-in or verification step. */
+/**
+ * Inputs that only appear on a sign-in or verification step.
+ *
+ * `autocomplete="username"` was here and had to come out: modern profile and account forms
+ * carry it too, so an edit-profile page with a name field classified as a login page. Only
+ * current-password and one-time-code are specific to authenticating.
+ */
 const CREDENTIAL_INPUT =
-  /<input[^>]+(?:type=["']?password|autocomplete=["'](?:current-password|one-time-code|username)["']|name=["']?(?:otp|passcode|one_?time|identifier|j_username|j_password)\b)/i;
+  /<input[^>]+(?:type=["']?password|autocomplete=["'](?:current-password|one-time-code)["']|name=["']?(?:otp|passcode|one_?time|j_username|j_password)\b)/i;
 
 /** An identifier field, in several languages and framework conventions. */
 const IDENTIFIER_INPUT =
@@ -103,6 +130,48 @@ function isJsonBody(body: string): boolean {
   return (t.startsWith("{") || t.startsWith("[")) && /["']\w+["']\s*:/.test(t.slice(0, 2000));
 }
 
+/** Auth-specific denial wording. Bare "expired" is absent on purpose - see below. */
+const DENY_WORDS =
+  /unauthori[sz]ed|unauthenticated|not[_\s-]?authenticated|forbidden|not[_\s-]?logged[_\s-]?in|login[_\s-]?required|authentication[_\s-]?required|invalid[_\s-]?token|token[_\s-]?expired|session[_\s-]?expired/i;
+
+/**
+ * Is this JSON body a denial, rather than a resource that happens to mention one?
+ *
+ * Three constraints, each from a false positive that suppressed a real resource:
+ *   - the wording must be auth-specific. A bare "expired" matched
+ *     {"code":"EXPIRED_COUPON"} - a cart, not a denial.
+ *   - the envelope must be essentially the whole body. A log line
+ *     {"message":"user 44 hit login_required","entries":[1,2,3]} carries real data.
+ *   - a populated array or object means data was returned, so access was NOT denied.
+ */
+export function isDenyEnvelope(body: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.trim());
+  } catch {
+    // Truncated or streaming JSON: fall back to the wording alone, on a short body only.
+    return body.length < 300 && DENY_WORDS.test(body);
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const obj = parsed as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  if (keys.length === 0 || keys.length > 5) return false;
+
+  const carriesData = keys.some((k) => {
+    const v = obj[k];
+    if (Array.isArray(v)) return v.length > 0;
+    return typeof v === "object" && v !== null && Object.keys(v as object).length > 0;
+  });
+  if (carriesData) return false;
+
+  return keys.some((k) => {
+    if (!/^(?:error|errors|detail|message|code|status|reason)$/i.test(k)) return false;
+    const v = obj[k];
+    return typeof v === "string" && DENY_WORDS.test(v);
+  });
+}
+
 export function looksLikeLoginPage(body: string): boolean {
   const head = body.slice(0, 60_000);
 
@@ -110,11 +179,7 @@ export function looksLikeLoginPage(body: string): boolean {
   // A 200 carrying {"error":"unauthorized"} is a denial that happens to have the wrong
   // status code. Treating it as the resource made every URL compare equal and fabricated
   // criticals.
-  if (isJsonBody(head)) {
-    return /["'](?:error|message|detail|code)["']\s*:\s*["'][^"']*(?:unauthor|unauthenticated|forbidden|not_?logged|login_?required|invalid_?token|expired)/i.test(
-      head,
-    );
-  }
+  if (isJsonBody(head)) return isDenyEnvelope(head);
 
   // ---- 2. An explicit interstitial, but only on a page that is ONLY that. -----------
   // "Sign in to continue using Acme Cloud after July 1" is an article headline. The rule
@@ -130,13 +195,20 @@ export function looksLikeLoginPage(body: string): boolean {
     if (/you must (?:log\s?in|sign\s?in|be (?:logged|signed) in)/i.test(head)) return true;
     if (/(?:please\s+)?(?:log\s?in|sign\s?in) to (?:view|continue|access)/i.test(head)) return true;
     if (/your session has (?:expired|timed out)|session expired/i.test(head)) return true;
-    if (/401\s*(?:-|:)?\s*(?:unauthorized|authorization required)/i.test(head)) return true;
+  }
+
+  // A literal 401/403 status page is a denial at ANY length. Gating this behind the terse
+  // threshold meant a stock Apache 401 body - which runs past 150 characters once it
+  // explains itself and appends a server signature - was not recognised, and a proxy that
+  // serves that body with a 200 would have manufactured a critical.
+  if (/\b40[13]\b[\s\S]{0,80}?(?:unauthorized|unauthorised|authorization required|forbidden)/i.test(head)) {
+    return true;
   }
 
   // ---- 3. Structure. ----------------------------------------------------------------
   const hasCredentialInput = CREDENTIAL_INPUT.test(head);
   const hasIdentifier = IDENTIFIER_INPUT.test(head);
-  const authAction = AUTH_ACTION.test(head);
+  const authAction = AUTH_ACTION.test(head) || OAUTH_ACTION.test(head);
   const operationAction = OPERATION_ACTION.test(head);
   const appChrome = APP_CHROME.test(head);
 
@@ -152,7 +224,12 @@ export function looksLikeLoginPage(body: string): boolean {
 
   // A form posting to an auth route is a gate in any language, whatever the button says.
   // This is what catches a two-step identifier page (Next) and an OTP step (Verify).
-  if (authAction && (hasCredentialInput || hasIdentifier)) return true;
+  // The negatives apply HERE too. This rule used to run before them, so any form action
+  // containing an auth-ish substring won outright - which is how the active-sessions page
+  // and the access-tokens page became "login pages" and were dropped from the scan.
+  if (authAction && (hasCredentialInput || hasIdentifier) && !operationAction && !isSignup) {
+    return true;
+  }
 
   // A credential input with an identifier and no application furniture around it. Covers a
   // login page in a script none of the vocabulary knows.
