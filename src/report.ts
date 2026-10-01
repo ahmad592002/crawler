@@ -132,6 +132,9 @@ function normalizePage(p: Partial<PageRecord>): PageRecord {
     deniedLinks: strArr(p.deniedLinks),
     links: num(p.links),
     authRequired: p.authRequired === true,
+    // Absent in records written before the field existed; false is the safe reading,
+    // since it only ever widens what coverage treats as a real page.
+    redirected: p.redirected === true,
     ok: p.ok ?? p.status !== null,
     mode: p.mode === "auth" ? "auth" : "anon",
     crawledAt: str(p.crawledAt),

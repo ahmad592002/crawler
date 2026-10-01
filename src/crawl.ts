@@ -53,6 +53,15 @@ export interface PageRecord {
   deniedLinks: string[];
   links: number;
   authRequired: boolean;
+  /**
+   * True when the final URL differed from the requested one.
+   *
+   * `status` is the status of the FINAL response after Playwright follows redirects, so
+   * a path that 302s elsewhere is recorded as 200 against the URL that was asked for.
+   * Without this flag nothing downstream can tell a real page from a redirect stub, and
+   * coverage.ts treated the stub as a page in its own right.
+   */
+  redirected: boolean;
   /** False when the navigation itself failed. A failed visit is NOT a crawled page. */
   ok: boolean;
   mode: "anon" | "auth";
@@ -469,6 +478,7 @@ async function visit(
       deniedLinks: [...new Set(deniedLinks)],
       links: info.links,
       authRequired,
+      redirected,
       ok: navOk,
       mode,
       crawledAt: new Date().toISOString(),

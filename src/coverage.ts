@@ -17,7 +17,7 @@
 import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT } from "./config.js";
-import type { PageRecord } from "./crawl.js";
+import type { PageRecord, FormInfo } from "./crawl.js";
 
 const OUT = resolve(ROOT, "output");
 const TESTS = resolve(ROOT, "tests");
@@ -163,17 +163,42 @@ export function visitsPath(haystack: string, path: string): boolean {
   // deficit forever. It is matched exactly instead: a navigation whose argument is the
   // string "/" and nothing else, with the closing quote immediately after.
   if (path === "/") {
-    return /(?:goto|tohaveurl|waitforurl|href\s*=|request\.(?:get|post|fetch))[^;\n]{0,40}?(["'`])\/\1/i.test(
-      haystack,
-    );
+    // `href\s*=` is deliberately NOT in this alternation, though it is in the general one
+    // below. A lone "/" is short enough that `page.locator('a[href="/"]')` and
+    // `expect(html).toContain('<a href="/">home</a>')` both matched it, so a link-checking
+    // spec asserting the nav bar has a home link permanently credited the site root
+    // without ever visiting it. A longer path does not have that problem: an href selector
+    // naming /some/page is real evidence the suite works with that page.
+    const quoted =
+      /(?:goto|tohaveurl|waitforurl|request\.(?:get|post|fetch))[^;\n]{0,40}?(["'`])\/\1/i;
+    // The concatenated forms, which the quoted pattern cannot see on its own:
+    // goto(baseURL + "/") and goto(`${baseURL}/`).
+    const concatenated =
+      /(?:goto|tohaveurl|waitforurl|request\.(?:get|post|fetch))[^;\n]{0,40}?(?:\+\s*(["'`])\/\1|\}\/`)/i;
+    return quoted.test(haystack) || concatenated.test(haystack);
   }
   if (path.length <= 1) return false;
 
-  // Collapse an :id / :uuid segment so a template matches an interpolated navigation:
-  // goto(`/users/${id}/invoice`) is a visit to /users/:id/invoice.
+  // An id placeholder becomes a wildcard, so a template matches an interpolated
+  // navigation: goto(`/users/${id}/invoice`) is a visit to /users/:id/invoice.
+  //
+  // Each placeholder gets the SHAPE crawl.ts collapsed, not a catch-all. One catch-all for
+  // all three was two separate over-credits: a single navigation to /u/1 scored /u/:id AND
+  // /u/:uuid AND /u/:hash - on a real app usually three different resources - and a
+  // navigation to a sibling literal like /u/new or /u/settings scored /u/:id, so testing
+  // the "new" form marked every user page tested. Each placeholder also accepts an
+  // interpolation, because goto(`/u/${id}`) is a real visit to /u/:id and the shapes
+  // above cannot match `${id}` - an earlier version of this fix silently stopped
+  // crediting every interpolated navigation in the suite.
+  const ID = "(?:\\d+|\\$\\{[^}]*\\})";
+  const UUID = "(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\\$\\{[^}]*\\})";
+  const HASH = "(?:[0-9a-f]{24,}|\\$\\{[^}]*\\})";
   const p = path
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/:id|:uuid|:hash/g, "[^/\"'`]+");
+    // Longest placeholder first, or :id would consume the tail of the others.
+    .replace(/:uuid/g, UUID)
+    .replace(/:hash/g, HASH)
+    .replace(/:id/g, ID);
 
   // Where the path may END: a closing quote, a trailing slash, a query/hash, or - inside a
   // template literal - an interpolation.
@@ -213,14 +238,18 @@ export function coverageKey(template: string, bareCrawled: ReadonlySet<string> =
   const bare = `${u.origin}${u.pathname}`;
   if (!u.search) return bare;
 
-  // The site itself answers the question. If the bare path was crawled as a page in its
-  // own right, the query is a knob on that page and folds into it. If it was not - the
-  // /index.php?page=login shape, where the parameter IS the routing - the names are kept,
-  // because there is no single page underneath for them to fold into.
+  // The site itself answers the question. If the bare path is a page in its own right -
+  // a 2xx that did not redirect away - then the query is a knob on that page and folds
+  // into it: /shifting_content/image at every ?pixel_shift is one thing to test.
   if (bareCrawled.has(bare)) return bare;
 
-  const names = [...new Set([...u.searchParams.keys()])].sort();
-  return `${bare}?${names.join("&")}`;
+  // Otherwise the query is doing the routing, and NOTHING may be folded - not even the
+  // values. Keeping parameter names and dropping values looked like a safe middle
+  // ground and was not: /index.php?page=login, ?page=admin and ?page=billing all carry
+  // the single name `page`, so three separate screens - one of them billing - collapsed
+  // into one unit that appeared in no gap list. There is no page underneath for them to
+  // fold into, which is exactly why the value is the only thing distinguishing them.
+  return template;
 }
 
 /** The bare paths that were crawled as pages in their own right - see coverageKey. */
@@ -263,8 +292,24 @@ export function computeCoverage(
 ): CoverageReport {
   // One entry per template; keep the record with the most to test.
   const byTemplate = new Map<string, PageRecord>();
+  // Per unit: every distinct form shape and control label seen on ANY of its records.
+  const unitParts = new Map<string, { forms: Map<string, FormInfo>; buttons: Map<string, string> }>();
+  // Only a page that genuinely EXISTS at the bare path may absorb that path's query
+  // variants. The earlier filter admitted anything that was not 404/410, so a bare path
+  // that answered 500, or 401, or 403, or that merely redirected somewhere else, became
+  // the parent of its own ?query= screens - and /index.php?page=login, ?page=admin and
+  // ?page=billing all vanished into one covered unit, in no gap list at all. That is the
+  // exact shape the fold was supposed to protect, so the protection has to be real:
+  // a 2xx, and the crawler must have stayed where it was sent.
   const bareCrawled = bareCrawledPaths(
-    pages.filter((p) => p.ok !== false && p.status !== 404 && p.status !== 410).map((p) => p.template),
+    pages
+      .filter((p) => {
+        if (p.ok === false) return false;
+        if (p.redirected === true) return false;
+        const s = p.status ?? 0;
+        return s >= 200 && s < 300;
+      })
+      .map((p) => p.template),
   );
   for (const p of pages) {
     if (p.ok === false) continue;
@@ -279,6 +324,30 @@ export function computeCoverage(
     const prev = byTemplate.get(key);
     const score = (r: PageRecord): number => r.forms.length * 10 + r.buttons.length;
     if (!prev || score(p) > score(prev)) byTemplate.set(key, p);
+
+    // The representative record is the one with the most to test, and it used to be the
+    // ONLY record whose forms and controls entered the denominator. Across the anon and
+    // auth crawls of this target that discarded 7 of the 14 forms observed and 11
+    // controls, so "forms 7/7" was 100% of the half that happened to be kept. A form
+    // that exists only on one sampled URL of a unit is still a form the suite has to
+    // cover, so every record of the unit contributes, deduplicated by shape.
+    const bucket = unitParts.get(key) ?? { forms: new Map(), buttons: new Map() };
+    for (const f of p.forms) {
+      const shape = [
+        (f.action || "").toLowerCase(),
+        (f.method || "").toLowerCase(),
+        f.fields
+          .map((x) => (x.name || "").toLowerCase())
+          .sort()
+          .join(","),
+      ].join("|");
+      if (!bucket.forms.has(shape)) bucket.forms.set(shape, f);
+    }
+    for (const b of p.buttons) {
+      const label = b.trim().toLowerCase();
+      if (label && !bucket.buttons.has(label)) bucket.buttons.set(label, b);
+    }
+    unitParts.set(key, bucket);
   }
 
   // Folded the same way as the map keys, or a Phase 5 feature recorded against one
@@ -300,23 +369,29 @@ export function computeCoverage(
 
   for (const [template, page] of byTemplate) {
     const path = pathOf(page.url);
-    // A template counts as covered if a spec navigates to it, or Phase 5 mapped it. Three
-    // forms are tried, because the unit and the sampled record are not the same string:
+    // A template counts as covered if a spec navigates to it, or Phase 5 mapped it.
+    // Several path forms are tried, because the unit and the sampled record are not the
+    // same string:
     //
     //   path      the sampled URL, query included
-    //   bare      the same without the query - a spec visiting /shifting_content/image
-    //             covers the unit even though the record carries ?pixel_shift=100
-    //   template  the id-collapsed shape, /infinite_scroll/:id
+    //   template  the id-collapsed shape, /infinite_scroll/:id. visitsPath has always
+    //             rewritten :id into a wildcard, but it was only ever handed the sampled
+    //             path, so that branch was dead and a spec visiting /infinite_scroll/1
+    //             scored nothing against the unit named /infinite_scroll/:id
+    //   bare      the same without the query - but ONLY when this unit actually folded
     //
-    // The template form matters more than it looks. visitsPath has always rewritten :id
-    // into a wildcard, but it was only ever handed the sampled path, so that branch was
-    // dead and a spec visiting /infinite_scroll/1 scored nothing against the unit named
-    // /infinite_scroll/:id - the suite was credited with less than it tests.
+    // That last condition matters. If the query is a knob, a spec visiting
+    // /shifting_content/image covers the unit at every ?pixel_shift. If the query is the
+    // ROUTING, it does not: a spec visiting /index.php must not be credited with having
+    // tested ?page=admin and ?page=billing. The folded unit has no query in its key, so
+    // the key itself says which case this is.
+    const unitFolded = !template.includes("?");
     const inSpec =
       visitsPath(specs.text, path) ||
-      visitsPath(specs.text, barePathOf(page.url)) ||
       visitsPath(specs.text, pathOf(page.template)) ||
-      visitsPath(specs.text, barePathOf(page.template));
+      (unitFolded &&
+        (visitsPath(specs.text, barePathOf(page.url)) ||
+          visitsPath(specs.text, barePathOf(page.template))));
     const inFeatures = featureTemplates.has(template) || featureTemplates.has(page.url);
     const covered = inSpec || inFeatures;
 
@@ -337,7 +412,11 @@ export function computeCoverage(
       });
     }
 
-    for (const form of page.forms) {
+    const parts = unitParts.get(template) ?? {
+      forms: new Map<string, FormInfo>(),
+      buttons: new Map<string, string>(),
+    };
+    for (const form of parts.forms.values()) {
       formsTotal++;
       const action = (form.action || "").toLowerCase();
       const fieldsNamed = form.fields.filter((f) => f.name).map((f) => f.name.toLowerCase());
@@ -365,7 +444,7 @@ export function computeCoverage(
       }
     }
 
-    for (const label of page.buttons) {
+    for (const label of parts.buttons.values()) {
       controlsTotal++;
       if (specs.text.includes(label.toLowerCase())) controlsCovered++;
       else {
