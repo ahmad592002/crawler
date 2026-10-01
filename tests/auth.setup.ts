@@ -6,7 +6,7 @@
  * email would insert the email steps here - createInbox() before submitting the signup
  * form, then extractCode/extractLinks on what waitForEmail returns. The rest is identical.
  */
-import { test as setup, expect, safeClick } from "./fixtures.js";
+import { test as setup, expect, safeClick, safeGoto } from "./fixtures.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT, env } from "../src/config.js";
@@ -19,7 +19,7 @@ const PASSWORD = env("TEST_PASSWORD", "SuperSecretPassword!")!;
 setup("log in and save session", async ({ page }) => {
   mkdirSync(resolve(ROOT, "output/auth"), { recursive: true });
 
-  await page.goto("/login");
+  await safeGoto(page, "/login");
   await page.getByLabel("Username").fill(USERNAME);
   await page.getByLabel("Password").fill(PASSWORD);
   await safeClick(page, "Login");

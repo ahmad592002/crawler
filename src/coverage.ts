@@ -157,6 +157,16 @@ function specHaystack(): { text: string; files: string[] } {
  * into forms.covered. Requiring a quoted, terminated occurrence fixes both.
  */
 export function visitsPath(haystack: string, path: string): boolean {
+  // The site root. A bare "/" cannot go through the matcher below - it would substring
+  // match every path on the site - but refusing it outright made the root permanently
+  // uncreditable, so a suite that does test the landing page still reported a one-page
+  // deficit forever. It is matched exactly instead: a navigation whose argument is the
+  // string "/" and nothing else, with the closing quote immediately after.
+  if (path === "/") {
+    return /(?:goto|tohaveurl|waitforurl|href\s*=|request\.(?:get|post|fetch))[^;\n]{0,40}?(["'`])\/\1/i.test(
+      haystack,
+    );
+  }
   if (path.length <= 1) return false;
 
   // Collapse an :id / :uuid segment so a template matches an interpolated navigation:
@@ -290,10 +300,23 @@ export function computeCoverage(
 
   for (const [template, page] of byTemplate) {
     const path = pathOf(page.url);
-    // A template counts as covered if a spec mentions its path, or Phase 5 mapped it.
-    // Either form counts: a spec that navigates to /shifting_content/image covers the
-    // unit even though the sampled record happens to carry ?pixel_shift=100.
-    const inSpec = visitsPath(specs.text, path) || visitsPath(specs.text, barePathOf(page.url));
+    // A template counts as covered if a spec navigates to it, or Phase 5 mapped it. Three
+    // forms are tried, because the unit and the sampled record are not the same string:
+    //
+    //   path      the sampled URL, query included
+    //   bare      the same without the query - a spec visiting /shifting_content/image
+    //             covers the unit even though the record carries ?pixel_shift=100
+    //   template  the id-collapsed shape, /infinite_scroll/:id
+    //
+    // The template form matters more than it looks. visitsPath has always rewritten :id
+    // into a wildcard, but it was only ever handed the sampled path, so that branch was
+    // dead and a spec visiting /infinite_scroll/1 scored nothing against the unit named
+    // /infinite_scroll/:id - the suite was credited with less than it tests.
+    const inSpec =
+      visitsPath(specs.text, path) ||
+      visitsPath(specs.text, barePathOf(page.url)) ||
+      visitsPath(specs.text, pathOf(page.template)) ||
+      visitsPath(specs.text, barePathOf(page.template));
     const inFeatures = featureTemplates.has(template) || featureTemplates.has(page.url);
     const covered = inSpec || inFeatures;
 

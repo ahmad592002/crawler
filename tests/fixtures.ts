@@ -320,8 +320,24 @@ export function safeClickLink(page: Page, name: string | RegExp): Promise<void> 
   return guardedClick(page, "link", name);
 }
 
-/** Navigate, refusing destructive URLs and anything off-origin. */
-export async function safeGoto(page: Page, url: string): Promise<void> {
+/**
+ * Navigate, refusing destructive URLs and anything off-origin.
+ *
+ * The wait defaults to `domcontentloaded`, NOT Playwright's `load`. Pages on this target
+ * embed third-party scripts - optimizely, and jQuery UI over plain http from
+ * ajax.googleapis.com - and when one of those hangs, `load` never fires. That took out
+ * both setup projects and /jqueryui/menu with 90s navigation timeouts on pages whose own
+ * markup had arrived in under a second. Nothing is lost by not waiting: the assertions
+ * (expect(...).toBeVisible and friends) are what actually waits for the page to settle,
+ * and a test that needs the load event can still say so - see /tinymce.
+ *
+ * Pass `waitUntil` to override. The guard applies either way.
+ */
+export async function safeGoto(
+  page: Page,
+  url: string,
+  options?: { waitUntil?: "commit" | "domcontentloaded" | "load" | "networkidle" },
+): Promise<void> {
   const absolute = url.startsWith("http") ? url : new URL(url, cfg.baseUrl).toString();
   if (!isAllowedUrl(absolute, cfg)) {
     throw new Error(`Refusing to navigate to ${absolute}: outside allowedOrigins.`);
@@ -329,7 +345,7 @@ export async function safeGoto(page: Page, url: string): Promise<void> {
   if (isDeniedUrl(absolute, cfg)) {
     throw new Error(`Refusing to navigate to ${absolute}: it matches qa.config.json denyList.`);
   }
-  await page.goto(url);
+  await page.goto(url, { waitUntil: options?.waitUntil ?? "domcontentloaded" });
 }
 
 export async function submitAndWait(

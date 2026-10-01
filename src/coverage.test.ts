@@ -378,3 +378,38 @@ test("a 404 bare path does not swallow its query variants", () => {
   const cov = computeCoverage(pages, noFeatures, specs(""));
   assert.equal(cov.templates.total, 2, "a page that does not exist is not the parent of anything");
 });
+
+test("a spec visiting a concrete id covers the :id template", () => {
+  // visitsPath has always rewritten :id to a wildcard, but computeCoverage only ever
+  // handed it the sampled URL, so the branch was dead and this scored 0.
+  const cov = computeCoverage(
+    [page({ url: "https://t.test/infinite_scroll/3", template: "https://t.test/infinite_scroll/:id" })],
+    noFeatures,
+    specs('await safeGoto(page, "/infinite_scroll/1");'),
+  );
+  assert.equal(cov.templates.covered, 1);
+  assert.deepEqual(cov.templates.uncovered, []);
+});
+
+test("the template form does not credit an unrelated page", () => {
+  const cov = computeCoverage(
+    [page({ url: "https://t.test/users/3", template: "https://t.test/users/:id" })],
+    noFeatures,
+    specs('await safeGoto(page, "/orders/1");'),
+  );
+  assert.equal(cov.templates.covered, 0);
+});
+
+test("the site root is creditable, but only by an exact navigation to it", () => {
+  const root = [page({ url: "https://t.test/", template: "https://t.test/" })];
+
+  const covered = computeCoverage(root, noFeatures, specs('await safeGoto(page, "/");'));
+  assert.equal(covered.templates.covered, 1, "a spec that visits the landing page tests it");
+
+  // The reason "/" was refused outright: it must not be credited by every other path.
+  const notCovered = computeCoverage(root, noFeatures, specs('await safeGoto(page, "/login");'));
+  assert.equal(notCovered.templates.covered, 0, "/login is not a visit to the root");
+
+  const alsoNot = computeCoverage(root, noFeatures, specs('expect(x).toBe("/");'));
+  assert.equal(alsoNot.templates.covered, 0, "a mention outside a navigation is not a visit");
+});

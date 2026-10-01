@@ -16,7 +16,7 @@
  * persona into that same account and marks the sessions as not independent. Replace the
  * body of `signUpAndLogIn` for a real target; everything around it stays.
  */
-import { test as setup, expect, safeClick } from "./fixtures.js";
+import { test as setup, expect, safeClick, safeGoto } from "./fixtures.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT, loadConfig } from "../src/config.js";
@@ -62,7 +62,7 @@ async function signUpAndLogIn(
   // Replace this block for a real site. It is kept deliberately small and obvious.
   const fixedUser = cfg.personas?.find((p) => p.id === persona.id)?.username ?? "tomsmith";
 
-  await page.goto("/login");
+  await safeGoto(page, "/login");
   await page.getByLabel("Username").fill(fixedUser);
   await page.getByLabel("Password").fill(persona.password);
   await safeClick(page, "Login");
@@ -84,7 +84,7 @@ export async function signUpWithEmailVerification(
   // accepting a stale code is the classic way this flow goes green while being broken.
   const since = new Date();
 
-  await page.goto("/signup");
+  await safeGoto(page, "/signup");
   await page.getByLabel(/email/i).fill(persona.email);
   await page.getByLabel(/password/i).first().fill(persona.password);
   await safeClick(page, /sign up|create account|register/i);
@@ -99,7 +99,7 @@ export async function signUpWithEmailVerification(
   } else {
     const [link] = extractLinks(body, new URL(cfg.baseUrl).host);
     if (!link) throw new Error(`No verification code or link in "${mail.subject}"`);
-    await page.goto(link);
+    await page.goto(link, { waitUntil: "domcontentloaded" });
   }
 
   await expect(page).not.toHaveURL(/signup/);
