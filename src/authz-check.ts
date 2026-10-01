@@ -707,7 +707,15 @@ async function main(): Promise<void> {
   } else {
     for (const f of findings) console.log(`  [${f.severity}] ${f.feature}\n            ${f.url}`);
   }
-  console.log(`\nwrote ${FINDINGS}`);
+  // The findings file is removed and then appended to, so a clean scan leaves no file at
+  // all. Claiming to have written one sent anyone looking for it to a path that does not
+  // exist, and made an absent file indistinguishable from a scan that never ran. The
+  // verdict lives in authz-status.json either way, which is what the report reads.
+  console.log(
+    findings.length > 0
+      ? `\nwrote ${FINDINGS}`
+      : `\nno findings, so no ${FINDINGS} - the verdict is in authz-status.json`,
+  );
 
   const blocking = findings.filter((f) => f.severity === "critical" || f.severity === "high").length;
   if (blocking > 0) process.exit(1);

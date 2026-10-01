@@ -12,7 +12,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildReport } from "./report.js";
@@ -104,4 +104,104 @@ test("rendering into a temp directory leaves the real output untouched", () => {
   renderWith({ "pages.jsonl": MINIMAL_PAGE + "\n" });
   const html = buildReport();
   assert.match(html, /QA report/);
+});
+
+// ------------------------------------------- does the report describe the current suite?
+
+/**
+ * The report quoted "72 tests" from a results file written nine hours earlier, before three
+ * spec files existed, and said nothing about it. Two easy ways to get there:
+ *
+ *   npx playwright test --reporter=line     a CLI reporter REPLACES the configured ones,
+ *                                           so the json reporter never runs and the old
+ *                                           results file survives untouched
+ *   npx playwright test one.spec.ts         overwrites the results with a subset
+ *
+ * A report that describes a different suite from the repository is worse than one that
+ * describes none, so the mismatch has to be visible in the HTML.
+ */
+
+/** Render with a tests/ directory beside the output box, so provenance can be checked. */
+function renderWithSuite(
+  files: Record<string, string>,
+  specs: Record<string, string>,
+  opts?: { resultsOlderThanSpecs?: boolean },
+): string {
+  const box = mkdtempSync(join(tmpdir(), "qa-prov-"));
+  const out = join(box, "output");
+  mkdirSync(join(out, "screenshots"), { recursive: true });
+  mkdirSync(join(box, "tests"), { recursive: true });
+
+  // Specs first, then the results, so a healthy run has the NEWER results file - which is
+  // the normal case and must not trip the staleness check. Writing them the other way round
+  // made the "no warning" test fail on its own fixture.
+  for (const [name, body] of Object.entries(specs)) writeFileSync(join(box, "tests", name), body);
+  for (const [name, body] of Object.entries(files)) writeFileSync(join(out, name), body);
+
+  if (opts?.resultsOlderThanSpecs) {
+    const old = (Date.now() - 86_400_000) / 1000;
+    utimesSync(join(out, "pw-results.json"), old, old);
+  }
+
+  try {
+    return buildReport(out);
+  } finally {
+    rmSync(box, { recursive: true, force: true });
+  }
+}
+
+/** A results file naming exactly the given spec files, each with one passing test. */
+const resultsFor = (specFiles: string[], startTime = new Date().toISOString()): string =>
+  JSON.stringify({
+    stats: { startTime },
+    suites: specFiles.map((file) => ({
+      title: file,
+      file,
+      specs: [{ title: "a test", ok: true }],
+    })),
+  });
+
+test("a spec file missing from the results is named in the report", () => {
+  const html = renderWithSuite(
+    { "pages.jsonl": MINIMAL_PAGE + "\n", "pw-results.json": resultsFor(["old.spec.ts"]) },
+    { "old.spec.ts": "// ran", "new.spec.ts": "// never ran" },
+  );
+
+  assert.match(html, /do not describe the current suite/);
+  assert.match(html, /new\.spec\.ts/, "the report must name the spec file it left out");
+});
+
+test("a results file older than the specs is called out", () => {
+  const html = renderWithSuite(
+    { "pages.jsonl": MINIMAL_PAGE + "\n", "pw-results.json": resultsFor(["a.spec.ts"]) },
+    { "a.spec.ts": "// edited after the run" },
+    { resultsOlderThanSpecs: true },
+  );
+
+  assert.match(html, /changed after this test run/);
+  assert.match(html, /a\.spec\.ts/);
+});
+
+test("results that match the suite produce no warning at all", () => {
+  // The warning has to stay quiet on a healthy run, or it becomes noise people skip past.
+  const html = renderWithSuite(
+    {
+      "pages.jsonl": MINIMAL_PAGE + "\n",
+      "pw-results.json": resultsFor(["a.spec.ts", "b.spec.ts"]),
+    },
+    { "a.spec.ts": "// ran", "b.spec.ts": "// ran" },
+  );
+
+  assert.doesNotMatch(html, /do not describe the current suite/);
+  assert.doesNotMatch(html, /changed after this test run/);
+  assert.match(html, /Run started /, "the run's own timestamp is still shown");
+});
+
+test("a setup file is not mistaken for a missing spec", () => {
+  // tests/ also holds *.setup.ts, which the json results do not list as spec files.
+  const html = renderWithSuite(
+    { "pages.jsonl": MINIMAL_PAGE + "\n", "pw-results.json": resultsFor(["a.spec.ts"]) },
+    { "a.spec.ts": "// ran", "auth.setup.ts": "// a setup project, not a spec" },
+  );
+  assert.doesNotMatch(html, /do not describe the current suite/);
 });

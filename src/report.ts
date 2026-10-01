@@ -5,7 +5,7 @@
  * overkill, so this resizes with sharp-free canvas-less scaling: the thumbnail is just the
  * original JPEG, size-capped, and links to the full file on disk).
  */
-import { existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { ROOT, loadConfig } from "./config.js";
 import type { PageRecord } from "./crawl.js";
@@ -207,15 +207,82 @@ function thumb(rel: string | null): string | null {
 
 const SEVERITY_ORDER: Severity[] = ["critical", "high", "medium", "low"];
 
-function testResults(): { total: number; passed: number; failed: number; specs: { title: string; ok: boolean }[] } {
-  const file = resolve(OUT, "pw-results.json");
-  if (!existsSync(file)) return { total: 0, passed: 0, failed: 0, specs: [] };
+/**
+ * Is the results file actually describing the specs that are on disk now?
+ *
+ * The report quoted "72 tests" from a file written nine hours earlier, before three spec
+ * files existed - and said nothing. The cause is easy to hit and easy to miss: passing
+ * `--reporter=line` on the command line REPLACES the reporters configured in
+ * playwright.config.ts, so the json reporter never runs and pw-results.json keeps whatever
+ * an older invocation left there. A filtered run (`-g`, or one spec file) does the same
+ * thing from the other direction - it overwrites the file with a subset.
+ *
+ * Either way the published report describes a different suite from the repository, which
+ * is worse than describing none. So it is checked and said out loud.
+ */
+function resultsProvenance(file: string): string[] {
+  const warnings: string[] = [];
+  const testsDir = resolve(OUT, "..", "tests");
+  if (!existsSync(testsDir)) return warnings;
 
-  let root: { suites?: PwSuite[] };
+  const resultsMtime = statSync(file).mtimeMs;
+  const specFiles = readdirSync(testsDir).filter((f) => /\.spec\.ts$/.test(f));
+
+  const newer = specFiles.filter((f) => statSync(resolve(testsDir, f)).mtimeMs > resultsMtime);
+  if (newer.length > 0) {
+    warnings.push(
+      `${newer.length} spec file(s) changed after this test run: ${newer.sort().join(", ")}`,
+    );
+  }
+  return warnings;
+}
+
+function testResults(): {
+  total: number;
+  passed: number;
+  failed: number;
+  specs: { title: string; ok: boolean }[];
+  ranAt: string | null;
+  warnings: string[];
+} {
+  const empty = { total: 0, passed: 0, failed: 0, specs: [], ranAt: null, warnings: [] };
+  const file = resolve(OUT, "pw-results.json");
+  if (!existsSync(file)) return empty;
+
+  let root: { suites?: PwSuite[]; stats?: { startTime?: unknown } };
   try {
-    root = JSON.parse(readFileSync(file, "utf8")) as { suites?: PwSuite[] };
+    root = JSON.parse(readFileSync(file, "utf8")) as {
+      suites?: PwSuite[];
+      stats?: { startTime?: unknown };
+    };
   } catch {
-    return { total: 0, passed: 0, failed: 0, specs: [] };
+    return empty;
+  }
+
+  const ranAt = typeof root.stats?.startTime === "string" ? root.stats.startTime : null;
+  const warnings = resultsProvenance(file);
+
+  // Files represented in the results, against the .spec.ts files that exist. A run filtered
+  // to one file leaves the others absent, and the totals then understate the suite.
+  const filesInResults = new Set<string>();
+  const collect = (suites: PwSuite[] | undefined): void => {
+    for (const s of suites ?? []) {
+      const f = (s as { file?: unknown }).file;
+      if (typeof f === "string") filesInResults.add(f.replace(/^.*[\\/]/, ""));
+      collect(s.suites);
+    }
+  };
+  collect(root.suites);
+
+  const testsDir = resolve(OUT, "..", "tests");
+  if (existsSync(testsDir)) {
+    const onDisk = readdirSync(testsDir).filter((f) => /\.spec\.ts$/.test(f));
+    const absent = onDisk.filter((f) => !filesInResults.has(f));
+    if (absent.length > 0) {
+      warnings.push(
+        `${absent.length} spec file(s) are not in this run at all: ${absent.sort().join(", ")}`,
+      );
+    }
   }
 
   const specs: { title: string; ok: boolean }[] = [];
@@ -233,6 +300,8 @@ function testResults(): { total: number; passed: number; failed: number; specs: 
     passed: specs.filter((s) => s.ok).length,
     failed: specs.filter((s) => !s.ok).length,
     specs,
+    ranAt,
+    warnings,
   };
 }
 
@@ -450,9 +519,23 @@ ${
 
 <h2>Test results</h2>
 ${
+  tests.warnings.length
+    ? `<div class="empty" style="border-color:#b45309;color:#92400e">
+         <strong>These results do not describe the current suite.</strong>
+         ${tests.warnings.map((w) => `<div>${esc(w)}</div>`).join("")}
+         <div style="margin-top:6px">Re-run <code>npx playwright test</code> without
+         <code>--reporter=line</code> and without a <code>-g</code> filter, then rebuild this
+         report. A CLI reporter replaces the one configured in playwright.config.ts, so the
+         json results file is left as an earlier run wrote it.</div>
+       </div>`
+    : ""
+}
+${
   tests.total
     ? `<div class="tablewrap"><table><thead><tr><th>Status</th><th>Spec</th></tr></thead><tbody>${specRows}</tbody></table></div>
-       <p class="sub" style="margin-top:10px">Full Playwright report: <a href="pw-report/index.html">output/pw-report</a></p>`
+       <p class="sub" style="margin-top:10px">${
+         tests.ranAt ? `Run started ${esc(tests.ranAt)}. ` : ""
+       }Full Playwright report: <a href="pw-report/index.html">output/pw-report</a></p>`
     : `<div class="empty">No Playwright results. Run <code>npx playwright test</code> with the json reporter to populate this.</div>`
 }
 
