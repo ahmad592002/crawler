@@ -179,6 +179,54 @@ export function visitsPath(haystack: string, path: string): boolean {
   return nav.test(haystack);
 }
 
+/**
+ * The unit of work coverage is measured in, as distinct from the crawl template.
+ *
+ * crawl.ts deliberately keeps query VALUES in its template, because the per-template
+ * sample cap needs ?page=1 and ?page=50 to be different shapes or it crawls three pages
+ * and calls a paginated section done. Coverage wants the opposite: one spec exercising
+ * /shifting_content/image covers it at every pixel_shift, and counting the eight value
+ * permutations separately put 11 rows of one layout-jitter demo into the denominator -
+ * a fifth of the whole score, measuring the crawler's sampling rather than the suite.
+ *
+ * So the value is dropped and the parameter NAME kept: ?mode=random&pixel_shift=100
+ * becomes ?mode&pixel_shift, which still separates pages whose query selects a genuinely
+ * different shape from pages that differ only by a knob setting.
+ */
+export function coverageKey(template: string, bareCrawled: ReadonlySet<string> = new Set()): string {
+  let u: URL;
+  try {
+    u = new URL(template);
+  } catch {
+    return template;
+  }
+  const bare = `${u.origin}${u.pathname}`;
+  if (!u.search) return bare;
+
+  // The site itself answers the question. If the bare path was crawled as a page in its
+  // own right, the query is a knob on that page and folds into it. If it was not - the
+  // /index.php?page=login shape, where the parameter IS the routing - the names are kept,
+  // because there is no single page underneath for them to fold into.
+  if (bareCrawled.has(bare)) return bare;
+
+  const names = [...new Set([...u.searchParams.keys()])].sort();
+  return `${bare}?${names.join("&")}`;
+}
+
+/** The bare paths that were crawled as pages in their own right - see coverageKey. */
+export function bareCrawledPaths(templates: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  for (const t of templates) {
+    try {
+      const u = new URL(t);
+      if (!u.search) out.add(`${u.origin}${u.pathname}`);
+    } catch {
+      /* not a URL; it can only ever be its own unit */
+    }
+  }
+  return out;
+}
+
 /** The path part, which is what a spec realistically contains. */
 function pathOf(url: string): string {
   try {
@@ -189,6 +237,15 @@ function pathOf(url: string): string {
   }
 }
 
+/** The same path with the query dropped - see coverageKey for why both are tried. */
+function barePathOf(url: string): string {
+  try {
+    return new URL(url).pathname.toLowerCase();
+  } catch {
+    return pathOf(url);
+  }
+}
+
 export function computeCoverage(
   pages: PageRecord[],
   features: FeatureEntry[],
@@ -196,6 +253,9 @@ export function computeCoverage(
 ): CoverageReport {
   // One entry per template; keep the record with the most to test.
   const byTemplate = new Map<string, PageRecord>();
+  const bareCrawled = bareCrawledPaths(
+    pages.filter((p) => p.ok !== false && p.status !== 404 && p.status !== 410).map((p) => p.template),
+  );
   for (const p of pages) {
     if (p.ok === false) continue;
     // A page that does not EXIST is not an untested page - 404 and 410 are absent, and
@@ -205,12 +265,20 @@ export function computeCoverage(
     // coverage score, and dropped the very page F-010 was found on.
     const status = p.status ?? 0;
     if (status === 404 || status === 410) continue;
-    const prev = byTemplate.get(p.template);
+    const key = coverageKey(p.template, bareCrawled);
+    const prev = byTemplate.get(key);
     const score = (r: PageRecord): number => r.forms.length * 10 + r.buttons.length;
-    if (!prev || score(p) > score(prev)) byTemplate.set(p.template, p);
+    if (!prev || score(p) > score(prev)) byTemplate.set(key, p);
   }
 
-  const featureTemplates = new Set(features.map((f) => f.template ?? f.url ?? ""));
+  // Folded the same way as the map keys, or a Phase 5 feature recorded against one
+  // query variant would stop matching the unit it belongs to.
+  const featureTemplates = new Set(
+    features.flatMap((f) => {
+      const raw = f.template ?? f.url ?? "";
+      return [raw, coverageKey(raw, bareCrawled)];
+    }),
+  );
   const gaps: CoverageGap[] = [];
   const uncovered: string[] = [];
 
@@ -223,7 +291,9 @@ export function computeCoverage(
   for (const [template, page] of byTemplate) {
     const path = pathOf(page.url);
     // A template counts as covered if a spec mentions its path, or Phase 5 mapped it.
-    const inSpec = visitsPath(specs.text, path);
+    // Either form counts: a spec that navigates to /shifting_content/image covers the
+    // unit even though the sampled record happens to carry ?pixel_shift=100.
+    const inSpec = visitsPath(specs.text, path) || visitsPath(specs.text, barePathOf(page.url));
     const inFeatures = featureTemplates.has(template) || featureTemplates.has(page.url);
     const covered = inSpec || inFeatures;
 

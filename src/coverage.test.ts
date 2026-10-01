@@ -6,8 +6,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeCoverage, type FeatureEntry } from "./coverage.js";
-import type { PageRecord } from "./crawl.js";
+import { computeCoverage, coverageKey, type FeatureEntry } from "./coverage.js";
+import { templateOf, type PageRecord } from "./crawl.js";
 
 const page = (over: Partial<PageRecord>): PageRecord =>
   ({
@@ -292,4 +292,89 @@ test("a real navigation still counts", () => {
     );
     assert.equal(cov.templates.covered, 1, `not credited for: ${src}`);
   }
+});
+
+// -------------------------------------------------- coverage unit vs crawl template
+
+const at = (u: string) => page({ url: u, template: u });
+
+test("coverageKey drops query values but keeps parameter names", () => {
+  const a = "https://t.test/shifting_content/image?mode=random&pixel_shift=100";
+  const b = "https://t.test/shifting_content/image?mode=fixed&pixel_shift=5";
+  assert.equal(coverageKey(a), coverageKey(b), "one knob setting is not a second page to test");
+  assert.equal(coverageKey(a), "https://t.test/shifting_content/image?mode&pixel_shift");
+  assert.notEqual(
+    coverageKey("https://t.test/x?mode=a"),
+    coverageKey("https://t.test/x?other=a"),
+    "a different parameter can select a genuinely different shape",
+  );
+  assert.notEqual(
+    coverageKey("https://t.test/x?mode=a"),
+    coverageKey("https://t.test/x"),
+    "the unparameterised page is still its own unit",
+  );
+});
+
+test("the coverage fold does NOT change what the crawler samples", () => {
+  // crawl.ts keeps query values on purpose - folding them capped every paginated
+  // section at three crawled pages. The coverage fold must stay on this side of the wall.
+  assert.notEqual(
+    templateOf("https://t.test/list?page=1"),
+    templateOf("https://t.test/list?page=2"),
+  );
+});
+
+test("query variants collapse into one coverage unit", () => {
+  const pages = [
+    at("https://t.test/jitter?mode=random"),
+    at("https://t.test/jitter?mode=fixed"),
+    at("https://t.test/jitter?pixel_shift=100"),
+    at("https://t.test/jitter?mode=random&pixel_shift=100"),
+  ];
+  const cov = computeCoverage(pages, noFeatures, specs(""));
+  assert.equal(cov.templates.total, 3, "?mode, ?pixel_shift, ?mode&pixel_shift - not four rows");
+});
+
+test("a spec visiting the bare path covers its query variants", () => {
+  const cov = computeCoverage(
+    [at("https://t.test/jitter?pixel_shift=100")],
+    noFeatures,
+    specs('await safeGoto(page, "/jitter");'),
+  );
+  assert.equal(cov.templates.covered, 1);
+  assert.deepEqual(cov.templates.uncovered, []);
+});
+
+test("a query folds into the bare page when that page was itself crawled", () => {
+  const pages = [
+    at("https://t.test/jitter"),
+    at("https://t.test/jitter?mode=random"),
+    at("https://t.test/jitter?pixel_shift=100"),
+    at("https://t.test/jitter?mode=random&pixel_shift=100"),
+  ];
+  const cov = computeCoverage(pages, noFeatures, specs(""));
+  assert.equal(cov.templates.total, 1, "one page with knobs is one thing to test");
+  assert.deepEqual(cov.templates.uncovered, ["https://t.test/jitter"]);
+});
+
+test("a query that IS the routing stays its own unit", () => {
+  // /index.php?page=login and /index.php?page=admin are two screens, and /index.php was
+  // never crawled bare - there is nothing underneath for them to fold into.
+  const pages = [
+    at("https://t.test/index.php?page=login"),
+    at("https://t.test/index.php?page=admin"),
+    at("https://t.test/index.php?page=login&tab=sso"),
+  ];
+  const cov = computeCoverage(pages, noFeatures, specs(""));
+  assert.equal(cov.templates.total, 2, "?page and ?page&tab - folded by name, not by value");
+});
+
+test("a 404 bare path does not swallow its query variants", () => {
+  const pages = [
+    page({ url: "https://t.test/r", template: "https://t.test/r", status: 404 }),
+    at("https://t.test/r?a=1"),
+    at("https://t.test/r?b=1"),
+  ];
+  const cov = computeCoverage(pages, noFeatures, specs(""));
+  assert.equal(cov.templates.total, 2, "a page that does not exist is not the parent of anything");
 });
