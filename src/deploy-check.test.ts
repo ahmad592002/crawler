@@ -9,7 +9,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanContent, auditHeaders, CONTENT_PATTERNS } from "./deploy-check.js";
+import {
+  scanContent,
+  auditHeaders,
+  collectHtml,
+  CONTENT_PATTERNS,
+  MAX_CONTENT_FETCH,
+} from "./deploy-check.js";
 import type { PageRecord } from "./crawl.js";
 import type { HttpExchange } from "./http-history.js";
 
@@ -223,4 +229,140 @@ test("header findings are deduplicated across many exchanges", () => {
   const many = Array.from({ length: 50 }, () => exchange({ headers: "content-type: text/html" }));
   const csp = auditHeaders(many).filter((f) => f.feature === "Missing Content-Security-Policy");
   assert.equal(csp.length, 1);
+});
+
+// ------------------------------------------------- what the content scan actually reads
+
+/**
+ * collectHtml used to be either/or: `if (html.size > 0) return html`. Because
+ * captureHttpHistory is off by default, the capture on disk is whatever an earlier run
+ * left behind - 14 documents against a 124-page crawl - and a non-empty capture
+ * short-circuited the fetch fallback, so 110 pages were never scanned and the run still
+ * printed "0 finding(s)". These tests exist so that cannot come back quietly.
+ */
+
+/** A capture entry whose base64 response carries `body` after the header block. */
+const exchangeFor = (url: string, body: string): HttpExchange =>
+  ({
+    url,
+    mimeType: "HTML",
+    response: Buffer.from(`HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n${body}`).toString(
+      "base64",
+    ),
+  }) as unknown as HttpExchange;
+
+const CFG = {
+  baseUrl: "https://target.test",
+  allowedOrigins: ["https://target.test"],
+  denyList: [],
+  denyUrlExceptions: [],
+  exclude: [],
+  include: [],
+} as unknown as import("./config.js").QaConfig;
+
+/** Run collectHtml with fetch stubbed, and report which URLs it asked for. */
+async function collectWithStub(
+  pages: PageRecord[],
+  history: HttpExchange[],
+  responder: (url: string) => { ok: boolean; status?: number; body: string } = () => ({
+    ok: true,
+    body: "<html/>",
+  }),
+): Promise<{ html: Map<string, string>; requested: string[] }> {
+  const requested: string[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    requested.push(url);
+    const r = responder(url);
+    return {
+      ok: r.ok,
+      status: r.status ?? (r.ok ? 200 : 500),
+      text: async () => r.body,
+    } as unknown as Response;
+  }) as typeof globalThis.fetch;
+  try {
+    const html = await collectHtml(pages, history, CFG, 5_000);
+    return { html, requested };
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+test("a partial capture does not suppress scanning the rest of the crawl", async () => {
+  // One captured document, three crawled pages. The old code returned the one and called
+  // it a day, leaving two pages unexamined while reporting success.
+  const captured = "https://target.test/captured";
+  const { html, requested } = await collectWithStub(
+    [page(captured), page("https://target.test/b"), page("https://target.test/c")],
+    [exchangeFor(captured, "<html>from capture</html>")],
+  );
+
+  assert.deepEqual(requested.sort(), ["https://target.test/b", "https://target.test/c"]);
+  assert.equal(html.size, 3, "every crawled page must be available to the content scan");
+  assert.match(html.get(captured) ?? "", /from capture/, "the captured body is kept as-is");
+});
+
+test("a page already in the capture is not fetched again", async () => {
+  const url = "https://target.test/a";
+  const { requested } = await collectWithStub([page(url)], [exchangeFor(url, "<html>x</html>")]);
+  assert.deepEqual(requested, [], "re-fetching what the capture already holds wastes requests");
+});
+
+test("an off-origin or failed page is never fetched", async () => {
+  const off = page("https://evil.test/x");
+  const failed = page("https://target.test/dead");
+  (failed as { ok: boolean }).ok = false;
+
+  const { requested } = await collectWithStub([off, failed, page("https://target.test/ok")], []);
+  assert.deepEqual(
+    requested,
+    ["https://target.test/ok"],
+    "the allowedOrigins guard and the ok flag both still apply here",
+  );
+});
+
+test("an unreachable page is skipped without taking the scan down", async () => {
+  const { html } = await collectWithStub(
+    [page("https://target.test/up"), page("https://target.test/down")],
+    [],
+    (url) => ({ ok: !url.endsWith("/down"), body: "<html/>" }),
+  );
+  assert.equal(html.size, 1);
+  assert.ok(html.has("https://target.test/up"));
+});
+
+test("a page the crawl already recorded as 404 is not fetched again", async () => {
+  // coverage.ts drops 404/410 from its denominator; the content scan must agree about what
+  // exists, or it burns a request per dead page and then calls the result "unreachable".
+  const dead = page("https://target.test/gone");
+  (dead as { status: number }).status = 404;
+  const alive = page("https://target.test/here");
+
+  const { html, requested } = await collectWithStub([dead, alive], []);
+  assert.deepEqual(requested, ["https://target.test/here"]);
+  assert.equal(html.size, 1);
+});
+
+test("a protected page is counted apart from a broken one", async () => {
+  // 401 from /basic_auth is the correct answer, not breakage. Both are excluded from the
+  // scanned set - there is no body to scan - but only one of them is a problem.
+  const { html, requested } = await collectWithStub(
+    [page("https://target.test/basic_auth"), page("https://target.test/ok")],
+    [],
+    (url) => (url.endsWith("/basic_auth") ? { ok: false, status: 401, body: "" } : { ok: true, body: "<html/>" }),
+  );
+  assert.deepEqual(requested.sort(), ["https://target.test/basic_auth", "https://target.test/ok"]);
+  assert.equal(html.size, 1, "a 401 serves no document to scan");
+});
+
+test("the fetch bound is respected and the excess is not silently dropped", async () => {
+  const many = Array.from({ length: MAX_CONTENT_FETCH + 5 }, (_, i) =>
+    page(`https://target.test/p${i}`),
+  );
+  const { requested } = await collectWithStub(many, []);
+  assert.equal(requested.length, MAX_CONTENT_FETCH, "the bound is a bound");
+  // The remainder is reported on stdout rather than dropped in silence; the count below is
+  // what the operator needs in order to notice the scan is narrower than the crawl.
+  assert.equal(many.length - requested.length, 5);
 });

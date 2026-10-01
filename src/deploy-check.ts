@@ -470,7 +470,24 @@ function readPages(): PageRecord[] {
   return out;
 }
 
-/** Page HTML, taken from the capture when present - otherwise re-fetched. */
+/**
+ * How many pages the content scan may fetch itself when the capture does not cover them.
+ * A bound, not a target: this is one GET per page against someone's site.
+ */
+const MAX_CONTENT_FETCH = 150;
+
+/**
+ * Page HTML for the content scan: whatever the capture holds, PLUS a direct fetch of every
+ * crawled page the capture does not cover.
+ *
+ * It used to be either/or - `if (html.size > 0) return html` - and that made the scan lie.
+ * captureHttpHistory is off by default, so the capture on disk is whatever some earlier run
+ * happened to leave behind: 14 documents against a 124-page crawl. A non-empty capture
+ * short-circuited the fallback, so 110 pages were never examined for leftovers and the scan
+ * printed "0 finding(s)" over 11% of the site. Finding what someone forgot to remove before
+ * deploying is this tool's whole purpose; silently skipping seven eighths of the pages is
+ * exactly the failure it exists to catch, in the tool itself.
+ */
 async function collectHtml(
   pages: PageRecord[],
   history: HttpExchange[],
@@ -489,27 +506,62 @@ async function collectHtml(
       /* skip */
     }
   }
-  if (html.size > 0) {
-    console.log(`  content: ${html.size} document(s) from the existing capture`);
-    return html;
+  const fromCapture = html.size;
+
+  // Only the pages the capture is missing. Deduplicated, because the crawl records one
+  // entry per visited URL and the capture is keyed by URL too.
+  const missing: string[] = [];
+  const seen = new Set(html.keys());
+  let gone = 0;
+  for (const p of pages) {
+    if (p.ok === false) continue;
+    if (seen.has(p.url)) continue;
+    if (!isAllowedUrl(p.url, cfg)) continue;
+    seen.add(p.url);
+    // A page the crawl already recorded as absent has no content to scan, and fetching it
+    // again only to discover the same 404 wastes a request and then reports it as
+    // "unreachable", which reads as breakage. coverage.ts drops 404/410 from its
+    // denominator on the same reasoning; the two should not disagree about what exists.
+    const status = p.status ?? 0;
+    if (status === 404 || status === 410) {
+      gone++;
+      continue;
+    }
+    missing.push(p.url);
   }
 
-  // No capture - fetch the crawled pages directly. Cheap: one GET each, no browser.
-  const targets = pages.filter((p) => p.ok !== false && isAllowedUrl(p.url, cfg)).slice(0, 80);
-  console.log(`  content: no capture found, fetching ${targets.length} page(s) directly`);
-  let ok = 0;
-  for (const p of targets) {
+  const targets = missing.slice(0, MAX_CONTENT_FETCH);
+  const overBound = missing.length - targets.length;
+
+  let fetched = 0;
+  let protectedPages = 0;
+  for (const url of targets) {
     try {
-      const res = await fetch(p.url, { signal: AbortSignal.timeout(timeoutMs) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
       if (res.ok) {
-        html.set(p.url, (await res.text()).slice(0, 500_000));
-        ok++;
+        html.set(url, (await res.text()).slice(0, 500_000));
+        fetched++;
+        continue;
       }
+      // 401/403 serves no page to scan, but it is the correct answer from a protected
+      // route - /basic_auth answers 401 by design. Reporting those as "unreachable"
+      // reads as breakage and buries the count that actually matters.
+      if (res.status === 401 || res.status === 403) protectedPages++;
     } catch {
-      /* unreachable page */
+      /* genuinely unreachable - timed out or refused */
     }
   }
-  console.log(`  content: fetched ${ok}`);
+
+  // Say what was actually examined. A count that does not add up is the signal that the
+  // scan is narrower than the crawl, and it should be visible without reading the code.
+  const unreachable = targets.length - fetched - protectedPages;
+  const parts = [`${fromCapture} from capture`, `${fetched} fetched`];
+  if (protectedPages > 0) parts.push(`${protectedPages} protected (401/403)`);
+  if (gone > 0) parts.push(`${gone} already 404/410 in the crawl`);
+  if (unreachable > 0) parts.push(`${unreachable} unreachable`);
+  if (overBound > 0) parts.push(`${overBound} NOT SCANNED - over the ${MAX_CONTENT_FETCH} cap`);
+  console.log(`  content: ${html.size} document(s) (${parts.join(", ")})`);
+
   return html;
 }
 
@@ -591,4 +643,4 @@ if (isEntry || process.argv[1]?.endsWith("deploy-check.ts")) {
   });
 }
 
-export { runProbes, scanContent, auditHeaders, CONTENT_PATTERNS, PROBES };
+export { runProbes, scanContent, auditHeaders, collectHtml, CONTENT_PATTERNS, PROBES, MAX_CONTENT_FETCH };
