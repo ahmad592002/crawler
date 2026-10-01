@@ -1,46 +1,56 @@
 /**
  * The report must survive a malformed status file.
  *
- * A non-array `personas` crashed the whole report - not just that section - because the new
+ * A non-array `personas` crashed the whole report - not just that section - because the
  * code used `?? []`, which guards null and undefined but not a string. strArr() had been
  * written for exactly this and was sitting three hundred lines above, unused.
+ *
+ * These call buildReport() directly. The previous version copied src/, junctioned the real
+ * node_modules into a temp box, spawned a subprocess render per test and then removed the
+ * box recursively - 13 seconds of an 8 second suite, and one filesystem behaviour change
+ * away from deleting node_modules through that junction.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, rmSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { ROOT } from "./config.js";
+import { join } from "node:path";
+import { buildReport } from "./report.js";
 
-/** Run report.ts against a throwaway output/ so the real one is untouched. */
+/** Render into a throwaway output directory and return the HTML. */
 function renderWith(files: Record<string, string>): string {
   const box = mkdtempSync(join(tmpdir(), "qa-report-"));
-  mkdirSync(join(box, "output", "screenshots"), { recursive: true });
-  for (const f of ["src", "qa.config.json", "package.json", "tsconfig.json"]) {
-    cpSync(resolve(ROOT, f), join(box, f), { recursive: true });
+  mkdirSync(join(box, "screenshots"), { recursive: true });
+  for (const [name, body] of Object.entries(files)) {
+    writeFileSync(join(box, name), body);
   }
   try {
-    execFileSync("cmd", ["/c", "mklink", "/J", join(box, "node_modules"), resolve(ROOT, "node_modules")], {
-      stdio: "pipe",
-    });
-  } catch {
-    // Junction may be unavailable; the run below will report the real reason.
+    return buildReport(box);
+  } finally {
+    rmSync(box, { recursive: true, force: true });
   }
-  for (const [name, body] of Object.entries(files)) {
-    writeFileSync(join(box, "output", name), body);
-  }
-  execFileSync("npx", ["tsx", "src/report.ts"], { cwd: box, stdio: "pipe", shell: process.platform === "win32" });
-  const html = readFileSync(join(box, "output", "report.html"), "utf8");
-  rmSync(box, { recursive: true, force: true });
-  return html;
 }
 
 const MINIMAL_PAGE = JSON.stringify({
-  url: "https://t.test/a", template: "https://t.test/a", status: 200, title: "a",
-  loadMs: 1, screenshot: null, consoleErrors: [], failedRequests: [], pageErrors: [],
-  forms: [], buttons: [], deniedButtons: [], deniedLinks: [], links: 0,
-  authRequired: false, ok: true, mode: "anon", crawledAt: "", depth: 0,
+  url: "https://t.test/a",
+  template: "https://t.test/a",
+  status: 200,
+  title: "a",
+  loadMs: 1,
+  screenshot: null,
+  consoleErrors: [],
+  failedRequests: [],
+  pageErrors: [],
+  forms: [],
+  buttons: [],
+  deniedButtons: [],
+  deniedLinks: [],
+  links: 0,
+  authRequired: false,
+  ok: true,
+  mode: "anon",
+  crawledAt: "",
+  depth: 0,
 });
 
 test("a non-array personas does not take the report down", () => {
@@ -49,7 +59,7 @@ test("a non-array personas does not take the report down", () => {
     "authz-status.json": JSON.stringify({ verdict: "clean", personas: "alice", sharedIdentity: "ab" }),
   });
   assert.match(html, /Authorization scan/);
-  assert.match(html, /alice/);
+  assert.match(html, /alice/, "a lone string persona should be shown, not silently dropped");
 });
 
 test("a corrupt status file renders the empty state, never a clean verdict", () => {
@@ -77,4 +87,21 @@ test("a missing coverage bucket produces 0%, not NaN", () => {
   });
   assert.doesNotMatch(html, /NaN/);
   assert.match(html, /Test coverage/);
+});
+
+test("an inconclusive verdict says so plainly", () => {
+  // A scan that compared nothing must not look like a clean one.
+  const html = renderWith({
+    "pages.jsonl": MINIMAL_PAGE + "\n",
+    "authz-status.json": JSON.stringify({ verdict: "inconclusive", compared: 0, templates: 48 }),
+  });
+  assert.match(html, /This scan proved nothing/);
+});
+
+test("rendering into a temp directory leaves the real output untouched", () => {
+  // buildReport mutates a module-level OUT; if it did not reset, the next caller would
+  // write into a directory that has just been deleted.
+  renderWith({ "pages.jsonl": MINIMAL_PAGE + "\n" });
+  const html = buildReport();
+  assert.match(html, /QA report/);
 });

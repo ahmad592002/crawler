@@ -10,7 +10,18 @@ import { resolve, sep } from "node:path";
 import { ROOT, loadConfig } from "./config.js";
 import type { PageRecord } from "./crawl.js";
 
-const OUT = resolve(ROOT, "output");
+const DEFAULT_OUT = resolve(ROOT, "output");
+
+/**
+ * The directory this render reads from and writes to.
+ *
+ * Parameterised so a test can render into a throwaway directory by CALLING the renderer.
+ * The alternative the tests used to take - copy src/, junction the real node_modules into
+ * a temp box, spawn three subprocess renders, then remove the box recursively - was slow
+ * (13 of the suite's 8 seconds) and sat one filesystem behaviour change away from deleting
+ * the real node_modules through that junction.
+ */
+let OUT = DEFAULT_OUT;
 
 type Severity = "critical" | "high" | "medium" | "low";
 
@@ -170,7 +181,8 @@ function safeHref(value: unknown): string | null {
   return esc(raw);
 }
 
-const SHOTS = resolve(OUT, "screenshots");
+/** Resolved per call, because OUT is no longer fixed at module load. */
+const shotsDir = (): string => resolve(OUT, "screenshots");
 
 /**
  * Inline a screenshot as a data URI, skipping anything too large to embed sensibly.
@@ -182,7 +194,8 @@ const SHOTS = resolve(OUT, "screenshots");
 function thumb(rel: string | null): string | null {
   if (!rel) return null;
   const file = resolve(OUT, rel);
-  const inside = file === SHOTS || file.startsWith(SHOTS + sep);
+  const shots = shotsDir();
+  const inside = file === shots || file.startsWith(shots + sep);
   if (!inside) return null;
   if (!/\.(jpe?g|png|webp)$/i.test(file)) return null;
   if (!existsSync(file) || !statSync(file).isFile()) return null;
@@ -223,7 +236,9 @@ function testResults(): { total: number; passed: number; failed: number; specs: 
   };
 }
 
-function main(): void {
+/** Build report.html. Exported so a test can render without spawning a process. */
+export function buildReport(outDir: string = DEFAULT_OUT): string {
+  OUT = outDir;
   const cfg = loadConfig();
   // Keep the LAST record per URL. A crawl that retried a page after a failed first
   // attempt leaves both lines in the file; showing the stale failure would misreport it.
@@ -526,11 +541,21 @@ ${slowest.map((p) => `<tr><td>${esc(p.loadMs)}ms</td><td class="url">${esc(p.url
 
   const out = resolve(OUT, "report.html");
   writeFileSync(out, html);
-  const kb = (Buffer.byteLength(html) / 1024).toFixed(0);
-  console.log(`Wrote ${out} (${kb} KB)`);
-  console.log(
-    `  ${pages.length} pages, ${findings.length} findings, ${features.length} features, ${tests.total} tests`,
-  );
+
+  // Quiet when rendering into a throwaway directory, so a test does not print over the
+  // runner's output.
+  if (OUT === DEFAULT_OUT) {
+    const kb = (Buffer.byteLength(html) / 1024).toFixed(0);
+    console.log(`Wrote ${out} (${kb} KB)`);
+    console.log(
+      `  ${pages.length} pages, ${findings.length} findings, ${features.length} features, ${tests.total} tests`,
+    );
+  }
+
+  // Reset, so one render cannot leave the module pointed at a temp directory that the
+  // next caller then writes into.
+  OUT = DEFAULT_OUT;
+  return html;
 }
 
-main();
+if (process.argv[1]?.endsWith("report.ts")) buildReport();
