@@ -10,7 +10,7 @@
  * test.fail() marks a known bug: the assertion states the behaviour we want, so the test
  * flips to passing when the bug is fixed.
  */
-import { test, expect, safeGoto, safeClickLocator } from "./fixtures.js";
+import { test, expect, safeGoto, safeClickLocator, openAnonymous } from "./fixtures.js";
 import type { Page } from "@playwright/test";
 
 test.describe("floating menu", () => {
@@ -104,47 +104,53 @@ test.describe("shifting content", () => {
 });
 
 test.describe("jQuery UI menu", () => {
-  // This page loads jQuery and jQuery UI from http://ajax.googleapis.com - over plain
-  // http, from a third party. When that CDN is slow the `load` event never arrives and a
-  // default goto spends the entire test timeout waiting on markup that is already there,
-  // which is how this spec first "failed". domcontentloaded, then wait for the widget.
   test.beforeEach(async ({ page }) => {
-    await safeGoto(page, "/jqueryui/menu", { waitUntil: "domcontentloaded" });
+    await safeGoto(page, "/jqueryui/menu");
   });
 
-  /** True once jQuery UI has actually upgraded #menu into a menu widget. */
-  const widgetReady = (page: Page): Promise<boolean> =>
-    page
-      .waitForFunction(
-        () =>
-          typeof (window as unknown as { jQuery?: { fn?: { menu?: unknown } } }).jQuery
-            ?.fn?.menu === "function" &&
-          document.querySelector("#menu")?.classList.contains("ui-menu") === true,
-        undefined,
-        { timeout: 20_000 },
-      )
-      .then(
-        () => true,
-        () => false,
-      );
+  /**
+   * True once jQuery UI has actually upgraded #menu into a menu widget.
+   *
+   * This page serves jQuery and jQuery UI from its OWN origin
+   * (/js/vendor/jquery-1.11.3.min.js and /js/vendor/jquery-ui-1.11.4/jquery-ui.js). The
+   * ajax.googleapis.com tags further down are duplicates inside an embedded fragment, and
+   * the fixture aborts them, so no third party is involved in the widget working. An
+   * earlier version of this block blamed that CDN and skipped the test when the widget was
+   * missing - a skip that could never fire for the stated reason, and that would have
+   * hidden a genuine hover defect if it ever did.
+   *
+   * The readiness wait is kept, because the upgrade is still asynchronous, but a failure to
+   * upgrade is now a failure of the page rather than an excuse to skip.
+   */
+  const widgetReady = (page: Page): Promise<void> =>
+    page.waitForFunction(
+      () =>
+        typeof (window as unknown as { jQuery?: { fn?: { menu?: unknown } } }).jQuery?.fn
+          ?.menu === "function" &&
+        document.querySelector("#menu")?.classList.contains("ui-menu") === true,
+      undefined,
+      { timeout: 20_000 },
+    ) as unknown as Promise<void>;
 
-  test("Disabled is marked disabled and Enabled is not", async ({ page }) => {
+  test("the menu is upgraded into a widget, with Disabled actually disabled", async ({ page }) => {
+    // ui-state-disabled is SERVER-RENDERED in the static markup, so asserting it alone
+    // proves nothing about jQuery UI and would pass with every script blocked. The widget
+    // wait is what makes this a test of the upgrade; the classes are then checked on top.
+    await widgetReady(page);
+
     const items = page.locator("#menu > li");
     await expect(items).toHaveCount(2);
     await expect(items.nth(0)).toHaveClass(/ui-state-disabled/);
     await expect(items.nth(0)).toContainText("Disabled");
     await expect(items.nth(1)).not.toHaveClass(/ui-state-disabled/);
     await expect(items.nth(1)).toContainText("Enabled");
+
+    // The part only the widget can produce: it owns the menu role and its items.
+    await expect(page.locator("#menu")).toHaveAttribute("role", "menu");
   });
 
   test("hovering Enabled opens its submenu and leaving closes it", async ({ page }) => {
-    // The behaviour under test belongs to jQuery UI, which this page fetches from a third
-    // party over http. If that never arrives there is nothing of the target's to test, so
-    // the result is recorded as skipped rather than reported as a defect in the site.
-    test.skip(
-      !(await widgetReady(page)),
-      "jQuery UI did not load from http://ajax.googleapis.com - third-party dependency, not a site defect",
-    );
+    await widgetReady(page);
 
     const submenu = page.locator("#menu > li").nth(1).locator("ul").first();
     await expect(submenu).toBeHidden();
@@ -186,6 +192,13 @@ test.describe("entry ad", () => {
 
     // Only now is the suppression durable for the rest of the session.
     await safeGoto(page, "/entry_ad");
+
+    // A bare waitForTimeout + toBeHidden was a negative assertion racing a timer: the page
+    // calls setTimeout(showAd, 500), so on a slow box the wait could elapse before the ad
+    // would have appeared and the test would pass for the wrong reason, hiding a
+    // regression in the dismissal. showAd() also hides #page-footer, so waiting for the
+    // footer to be VISIBLE is a positive signal that the show path ran and declined.
+    await expect(page.locator("#page-footer")).toBeVisible();
     await page.waitForTimeout(2000);
     await expect(modal).toBeHidden();
   });
@@ -193,13 +206,17 @@ test.describe("entry ad", () => {
   test("a fresh session sees the ad again", async ({ browser }) => {
     // Proves the suppression above is per-session state, not a permanent server flag -
     // otherwise the first test would quietly disable the feature for every later run.
-    const context = await browser.newContext();
-    const fresh = await context.newPage();
+    //
+    // openAnonymous rather than browser.newContext() by hand: it applies harden(), which is
+    // what aborts off-origin requests and sets the navigation default. Building the context
+    // inline skipped that, making this the one page in the suite that really did contact
+    // third parties - the exact thing the fixture exists to prevent.
+    const guest = await openAnonymous(browser);
     try {
-      await safeGoto(fresh, "/entry_ad");
-      await expect(fresh.locator("#modal")).toBeVisible({ timeout: 10_000 });
+      await safeGoto(guest.page, "/entry_ad");
+      await expect(guest.page.locator("#modal")).toBeVisible({ timeout: 10_000 });
     } finally {
-      await context.close();
+      await guest.close();
     }
   });
 });

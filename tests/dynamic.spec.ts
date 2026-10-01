@@ -10,18 +10,33 @@
  * test.fail() marks a known bug: the assertion states the behaviour we want, so the test
  * flips to passing when the bug is fixed.
  */
-import { test, expect, safeGoto, safeClick, safeClickLink } from "./fixtures.js";
+import { test, expect, safeGoto, safeGotoResponse, safeClick, safeClickLink } from "./fixtures.js";
+import { loadConfig } from "../src/config.js";
+
+const cfg = loadConfig();
 
 test.describe("A/B test", () => {
-  test("the opt-out cookie pins the variant across reloads", async ({ page, context }) => {
-    await safeGoto(page, "/abtest");
+  test("the opt-out cookie turns the experiment off", async ({ page, context }) => {
     const heading = page.locator("#content h3");
-    await expect(heading).toHaveText(/A\/B Test/);
 
-    // optimizelyOptOut is how the site pins "No A/B Test"; without it the heading is
-    // one of two values and any assertion on it is a coin flip.
+    // The precondition has to establish that a VARIANT was live, or the test cannot tell
+    // "the opt-out worked" from "no variant was ever assigned". The first version asserted
+    // /A\/B Test/, which both possible headings satisfy - trivially true, and it would have
+    // passed even if the cookie were ignored entirely. Measured in a browser: without the
+    // cookie this is "A/B Test Variation 1" on every load, with it "No A/B Test".
+    await safeGoto(page, "/abtest");
+    await expect(heading).not.toHaveText("No A/B Test");
+
     await context.addCookies([
-      { name: "optimizelyOptOut", value: "true", domain: "the-internet.herokuapp.com", path: "/" },
+      {
+        name: "optimizelyOptOut",
+        value: "true",
+        // Derived from config, so the test does not silently stop working if the target
+        // moves. Host-only: deliberately not a .herokuapp.com wildcard, which would hand
+        // the cookie to every unrelated app on that domain.
+        domain: new URL(cfg.baseUrl).hostname,
+        path: "/",
+      },
     ]);
     await safeGoto(page, "/abtest");
     await expect(heading).toHaveText("No A/B Test");
@@ -116,19 +131,36 @@ test.describe("infinite scroll", () => {
   test("the numbered pages are reachable without scrolling", async ({ page }) => {
     // /infinite_scroll/:id is the template the crawler sees; it has to answer directly or
     // the content is unreachable to anything that does not run JavaScript.
-    await safeGoto(page, "/infinite_scroll/1");
-    await expect(page.locator("body")).not.toBeEmpty();
+    //
+    // `not.toBeEmpty()` on <body> was the first version of this and proved nothing: every
+    // page on this target carries a header and a footer, so it passes on a 404 body too.
+    const response = await safeGotoResponse(page, "/infinite_scroll/1");
+    expect(response?.status(), "the deep link must answer, not 404").toBe(200);
+
+    // This URL serves a bare HTML FRAGMENT - no <html>, no <head>, no #content, no site
+    // chrome - because it is the partial the scroller appends, not a page. Two selector
+    // guesses failed here before I fetched it and looked: a <p> wrapper (there is none)
+    // and #content (not present). The assertion that fits what it really is: the fragment
+    // carries a substantial block of its own text.
+    const body = page.locator("body");
+    expect(
+      (await body.innerText()).trim().length,
+      "the deep link answered 200 but served no content",
+    ).toBeGreaterThan(200);
   });
 });
 
 test.describe("slow and large pages", () => {
-  test("/slow answers within the timeout", async ({ page }) => {
+  test("/slow answers and serves its content", async ({ page }) => {
+    // The 30s bound this used to assert was met by a 0.6s response, so nothing short of a
+    // total outage could fail it. The bound is kept, loosely, as an upper guard against the
+    // page becoming unbounded - but the real assertion is that the content arrives, which
+    // is what a reader actually needs from a page whose whole gimmick is being slow.
     const started = Date.now();
-    const response = await page.goto("/slow");
+    const response = await safeGotoResponse(page, "/slow");
     expect(response?.status()).toBe(200);
-    // Not a performance budget - a regression guard. The page is deliberately slow; what
-    // would be a bug is it becoming unbounded.
-    expect(Date.now() - started).toBeLessThan(30_000);
+    await expect(page.locator("#content")).toContainText(/\S/);
+    expect(Date.now() - started, "the page should not become unbounded").toBeLessThan(30_000);
   });
 
   test("/large renders its whole table", async ({ page }) => {
@@ -142,33 +174,60 @@ test.describe("slow and large pages", () => {
   });
 });
 
-test.describe("pages that are broken on purpose", () => {
-  // These two pages exist to carry a defect. The assertion states the healthy behaviour,
-  // so each one flips green if the target is ever fixed - which is the point of test.fail.
+test.describe("a page that is broken on purpose", () => {
+  // /javascript_error throws from its own inline onload handler - same origin, nothing
+  // third-party involved - so this is a genuine defect in the target. The assertion states
+  // the healthy behaviour, so it flips green if the target is ever fixed, which is the
+  // point of test.fail.
+  //
+  // The listener is attached before navigating and the assertion polls, because the
+  // pageerror event can arrive after waitForLoadState("load") resolves. Asserting once,
+  // immediately, made this report an unexpected PASS on a page that had thrown.
   test.fail("/javascript_error loads without throwing", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await safeGoto(page, "/javascript_error");
     await page.waitForLoadState("load");
+    await expect
+      .poll(() => errors.length, { timeout: 5_000, message: "waiting for the onload error" })
+      .toBeGreaterThan(0);
     expect(errors, `onload threw: ${errors.join("; ")}`).toEqual([]);
   });
+});
 
-  test.fail("/tinymce initialises its editor", async ({ page }) => {
-    const errors: string[] = [];
-    page.on("pageerror", (e) => errors.push(e.message));
+test.describe("tinymce under our own off-origin policy", () => {
+  /**
+   * There used to be a test.fail here claiming "/tinymce does not initialise its editor"
+   * as a target defect. It was not one.
+   *
+   * The editor is served from https://cdn.tiny.cloud, and the `page` fixture aborts every
+   * off-origin request (fixtures.ts: anything outside allowedOrigins). So `tinymce` is
+   * never defined, the page's inline tinymce.init() throws, and the test.fail recorded a
+   * pass - for a condition this suite creates itself. Worse, it would have flipped to an
+   * unexpected pass, turning the suite red, if that CDN were ever allow-listed or
+   * captureOffOrigin were turned on: red for the site getting better.
+   *
+   * What can honestly be tested under that policy is the progressive-enhancement floor:
+   * with the editor's script blocked, the page must still serve usable markup. That is a
+   * real property - it is what a user with a blocked CDN or a strict CSP gets.
+   */
+  test("the raw textarea is still served and editable when the CDN is blocked", async ({
+    page,
+  }) => {
     await safeGoto(page, "/tinymce");
-    await page.waitForLoadState("load");
-    expect(errors, `editor bootstrap threw: ${errors.join("; ")}`).toEqual([]);
-  });
 
-  test("/tinymce still serves the textarea the editor is meant to replace", async ({ page }) => {
-    // The progressive-enhancement floor: even with the editor failing, the content is
-    // editable. This one passes today and is the regression guard around the bug above.
-    await safeGoto(page, "/tinymce");
+    // Assert the policy this test depends on actually held, so the test cannot quietly
+    // become a test of a fully-initialised editor that happens to also have a textarea.
+    const editorLoaded = await page.evaluate(
+      () => typeof (window as unknown as { tinymce?: unknown }).tinymce !== "undefined",
+    );
+    expect(editorLoaded, "cdn.tiny.cloud answered - this test's premise no longer holds").toBe(
+      false,
+    );
+
     const textarea = page.locator("textarea").first();
     await expect(textarea).toBeVisible();
-    await textarea.fill("typed into the fallback");
-    await expect(textarea).toHaveValue("typed into the fallback");
+    await expect(textarea).toHaveText(/Your content goes here/i);
   });
 });
 

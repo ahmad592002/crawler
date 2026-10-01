@@ -5,7 +5,15 @@
  * default waitUntil:"load" waits on tracker requests that may hang or fail to resolve,
  * which shows up as a navigation timeout that has nothing to do with the site under test.
  */
-import { test as base, expect, type Page, type Locator, type Browser, type BrowserContext } from "@playwright/test";
+import {
+  test as base,
+  expect,
+  type Page,
+  type Locator,
+  type Browser,
+  type BrowserContext,
+  type Response,
+} from "@playwright/test";
 import { existsSync } from "node:fs";
 import { loadConfig, isDenied, isDeniedUrl, isAllowedUrl } from "../src/config.js";
 import { personaById, type Persona } from "../src/personas.js";
@@ -323,13 +331,22 @@ export function safeClickLink(page: Page, name: string | RegExp): Promise<void> 
 /**
  * Navigate, refusing destructive URLs and anything off-origin.
  *
- * The wait defaults to `domcontentloaded`, NOT Playwright's `load`. Pages on this target
- * embed third-party scripts - optimizely, and jQuery UI over plain http from
- * ajax.googleapis.com - and when one of those hangs, `load` never fires. That took out
- * both setup projects and /jqueryui/menu with 90s navigation timeouts on pages whose own
- * markup had arrived in under a second. Nothing is lost by not waiting: the assertions
- * (expect(...).toBeVisible and friends) are what actually waits for the page to settle,
- * and a test that needs the load event can still say so - see /tinymce.
+ * The wait defaults to `domcontentloaded` rather than Playwright's `load`, to match what
+ * the `page` fixture above already does to every page.goto it hands out. Keeping the two
+ * in step is the whole value of this default: a spec that reaches for safeGoto should not
+ * get a different navigation contract from one that does not.
+ *
+ * It is NOT what fixed the 90s setup-project timeouts. An earlier version of this comment
+ * claimed that, and claimed the cause was `load` hanging on jQuery UI from
+ * ajax.googleapis.com. Both are wrong: the fixture had already defaulted goto to
+ * domcontentloaded, so the setups were never waiting for `load`, and off-origin requests
+ * are aborted outright, so a third party cannot hold a navigation open. Those timeouts
+ * remain undiagnosed - they have not recurred across several full runs, which points at
+ * transient slowness at the target rather than anything in this file. Said plainly here
+ * because a wrong explanation on the shelf is worse than an open question.
+ *
+ * Nothing is lost by not waiting for `load`: the assertions are what actually waits. A
+ * test that genuinely needs the load event can pass `waitUntil` or call waitForLoadState.
  *
  * Pass `waitUntil` to override. The guard applies either way.
  */
@@ -345,7 +362,35 @@ export async function safeGoto(
   if (isDeniedUrl(absolute, cfg)) {
     throw new Error(`Refusing to navigate to ${absolute}: it matches qa.config.json denyList.`);
   }
-  await page.goto(url, { waitUntil: options?.waitUntil ?? "domcontentloaded" });
+  // The ABSOLUTE url, which was computed above to run the guard and was then thrown away
+  // while the relative one was passed on. That made every safeGoto depend on the context
+  // having inherited `baseURL` - true for the fixture's own page, not guaranteed for a
+  // context built by hand in openAs/openAnonymous, where a relative goto is an Invalid URL.
+  // Navigating the exact string the guard approved also removes any chance of the two
+  // disagreeing about where the request is going.
+  await page.goto(absolute, { waitUntil: options?.waitUntil ?? "domcontentloaded" });
+}
+
+/**
+ * safeGoto, but handing back the Response.
+ *
+ * A test that needs the status code was reaching for a bare page.goto to get it, which
+ * walks straight past the guard - the exact hole the guard exists to close. Same checks,
+ * same absolute-URL navigation, just without throwing the response away.
+ */
+export async function safeGotoResponse(
+  page: Page,
+  url: string,
+  options?: { waitUntil?: "commit" | "domcontentloaded" | "load" | "networkidle" },
+): Promise<Response | null> {
+  const absolute = url.startsWith("http") ? url : new URL(url, cfg.baseUrl).toString();
+  if (!isAllowedUrl(absolute, cfg)) {
+    throw new Error(`Refusing to navigate to ${absolute}: outside allowedOrigins.`);
+  }
+  if (isDeniedUrl(absolute, cfg)) {
+    throw new Error(`Refusing to navigate to ${absolute}: it matches qa.config.json denyList.`);
+  }
+  return page.goto(absolute, { waitUntil: options?.waitUntil ?? "domcontentloaded" });
 }
 
 export async function submitAndWait(
