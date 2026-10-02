@@ -73,7 +73,10 @@
     "close",
     "deregister",
     "cancel order",
-    "cancel"
+    "cancel",
+    "update profile",
+    "open account",
+    "new account"
   ],
   "denyUrlExceptions": [],
   "emailPattern": "{GMAIL_LOCAL}+{runId}-{n}@gmail.com",

@@ -128,6 +128,91 @@ test("templateOf collapses a ULID, which is neither digits nor hex", () => {
   );
 });
 
+
+// ------------------------------------------- concatenated destructive routes
+
+/**
+ * A URL concatenates what a label spaces out.
+ *
+ * Found by pointing the agent at a banking demo: /transfer.htm and /withdraw.htm were
+ * correctly refused, because those are single words, while /billpay.htm was ALLOWED - the
+ * path splits into the one token "billpay", and the deny entry "bill pay" cannot match it
+ * on a word boundary. A money-moving route, waved through by the guard whose entire job is
+ * to stop exactly that.
+ */
+const bankCfg = {
+  ...cfg,
+  denyList: [
+    ...cfg.denyList,
+    "bill pay",
+    "transfer funds",
+    "open new account",
+    "request loan",
+    "update profile",
+    // Single words, as a real banking target would carry them. The regression test below
+    // needs these present to prove the squash pass did not disturb word-boundary matching.
+    "transfer",
+    "withdraw",
+    "deposit",
+  ],
+  denyUrlExceptions: [],
+};
+
+test("a concatenated multi-word destructive route is refused", () => {
+  for (const path of [
+    "/billpay.htm",
+    "/BillPay.htm",
+    "/bill-pay",
+    "/bill_pay",
+    "/transferfunds.htm",
+    "/opennewaccount.htm",
+    "/requestloan.htm",
+    "/updateprofile.htm",
+    "/parabank/billpay.htm?accountId=12345",
+  ]) {
+    assert.equal(
+      isDeniedUrl(`https://bank.test${path}`, bankCfg),
+      true,
+      `${path} moves money or changes an account and must be refused`,
+    );
+  }
+});
+
+test("squashing does not start refusing innocent paths", () => {
+  // The reason only MULTI-WORD entries are squashed: doing it to single words would match
+  // "pay" inside "paypal" and "repayment", and a guard that blocks legitimate pages is a
+  // guard somebody switches off.
+  for (const path of [
+    "/paypal-integration-docs",
+    "/repayment-calculator",
+    "/about.htm",
+    "/news.htm",
+    "/services/ParaBank?wsdl",
+    "/closest-branch",
+    "/transfers-explained-help",
+  ]) {
+    assert.equal(
+      isDeniedUrl(`https://bank.test${path}`, bankCfg),
+      false,
+      `${path} is informational and must stay crawlable`,
+    );
+  }
+});
+
+test("the single-word routes that already worked still work", () => {
+  // Regression guard: the squash pass is additive and must not have changed these.
+  for (const path of ["/transfer.htm", "/withdraw.htm", "/deposit.htm"]) {
+    assert.equal(isDeniedUrl(`https://bank.test${path}`, bankCfg), true, path);
+  }
+});
+
+test("a deny-list exception still overrides the squash pass", () => {
+  // Exceptions are checked first and must stay authoritative, or a target cannot opt a
+  // known-safe path back in.
+  const withException = { ...bankCfg, denyUrlExceptions: ["/billpay\\.htm$"] };
+  assert.equal(isDeniedUrl("https://bank.test/billpay.htm", withException), false);
+});
+
 // ------------------------------------------------------------------ Burp XML
 
 const exchange: HttpExchange = {

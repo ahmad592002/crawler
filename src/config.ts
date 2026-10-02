@@ -249,7 +249,27 @@ export function isDeniedUrl(url: string, cfg: QaConfig): boolean {
     // Malformed percent-encoding; match against the raw form instead.
   }
   const words = foldLabel(decoded.replace(/[/_\-+.=&?]+/g, " "));
-  return isDenied(words, cfg) || DESTRUCTIVE_ROUTE.test(words);
+  if (isDenied(words, cfg) || DESTRUCTIVE_ROUTE.test(words)) return true;
+
+  // URLs concatenate what labels space out. Splitting the path on separators turns
+  // /billpay.htm into the single token "billpay", which the phrase "bill pay" can never
+  // match on a word boundary - so a money-moving route on a banking target was allowed
+  // while /transfer.htm and /withdraw.htm, single words, were correctly refused. Same hole
+  // for /newaccount, /placeorder, /closeaccount, /requestloan, /emptycart.
+  //
+  // So multi-word deny entries are ALSO matched against the path with every separator
+  // removed. Only multi-word ones, and only from six characters up: squashing single words
+  // would match "pay" inside "paypal" and "repayment", which is how an over-eager guard
+  // starts blocking legitimate pages and gets switched off.
+  const squashed = foldLabel(decoded).replace(/[^a-z0-9]+/g, "");
+  if (squashed) {
+    for (const entry of cfg.denyList) {
+      if (!/[\s_-]/.test(entry)) continue;
+      const phrase = foldLabel(entry).replace(/[^a-z0-9]+/g, "");
+      if (phrase.length >= 6 && squashed.includes(phrase)) return true;
+    }
+  }
+  return false;
 }
 
 /** One entry of qa.config.json "personas". */
