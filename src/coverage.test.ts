@@ -101,7 +101,7 @@ test("a form is covered when a spec names one of its fields", () => {
     [page({ forms: [{ action: "", method: "post", destructive: false,
       fields: [{ name: "coupon_code", type: "text", label: "Coupon", required: false }] }] })],
     noFeatures,
-    specs(`await page.fill('[name=coupon_code]', "X")`),
+    specs(`await safeGoto(page, "/x"); await page.fill('[name=coupon_code]', "X")`),
   );
   assert.equal(cov.forms.covered, 1);
 });
@@ -110,7 +110,7 @@ test("a button no spec names is reported", () => {
   const cov = computeCoverage(
     [page({ buttons: ["Publish", "Save draft"] })],
     noFeatures,
-    specs(`getByRole("button", { name: "Publish" })`),
+    specs(`await safeGoto(page, "/x"); getByRole("button", { name: "Publish" })`),
   );
   assert.equal(cov.controls.total, 2);
   assert.equal(cov.controls.covered, 1);
@@ -571,4 +571,47 @@ test("a feature recorded against a query variant is folded like the map keys", (
   );
   assert.equal(cov.templates.total, 1);
   assert.equal(cov.templates.covered, 1, "the feature must credit the folded unit");
+});
+
+test("a form is NOT credited by a spec that never visits its page", () => {
+  // The cross-target false credit. Measured on a banking target with no spec of its own:
+  // forms read 74% and controls 69%, because the demo suite mentions "username",
+  // "password" and "login" and every login form on earth has those fields. A spec that
+  // never navigates to a page is not testing the form on it.
+  const login = page({
+    url: "https://t.test/login.htm",
+    template: "https://t.test/login.htm",
+    forms: [
+      {
+        action: "/authenticate",
+        method: "post",
+        destructive: false,
+        fields: [
+          { name: "username", type: "text", label: "Username", required: false },
+          { name: "password", type: "password", label: "Password", required: false },
+        ],
+      },
+    ],
+    buttons: ["Log In"],
+  } as Partial<PageRecord>);
+
+  // A suite written for a DIFFERENT site: it fills username and password and clicks Log
+  // In, but never goes anywhere near /login.htm.
+  const otherSite = specs(
+    'await safeGoto(page, "/some-other-site-page"); await page.getByLabel("Username").fill(u);' +
+      ' await page.getByLabel("Password").fill(p); await safeClick(page, "Log In");',
+  );
+
+  const cov = computeCoverage([login], noFeatures, otherSite);
+  assert.equal(cov.forms.covered, 0, "naming a field is not testing the form");
+  assert.equal(cov.controls.covered, 0, '"Log In" appears in every suite ever written');
+
+  // ...and the same suite, once it actually visits the page, does credit them.
+  const sameSite = specs(
+    'await safeGoto(page, "/login.htm"); await page.getByLabel("Username").fill(u);' +
+      ' await safeClick(page, "Log In");',
+  );
+  const covered = computeCoverage([login], noFeatures, sameSite);
+  assert.equal(covered.forms.covered, 1);
+  assert.equal(covered.controls.covered, 1);
 });

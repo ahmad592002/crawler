@@ -423,10 +423,18 @@ export function computeCoverage(
       const action = (form.action || "").toLowerCase();
       const fieldsNamed = form.fields.filter((f) => f.name).map((f) => f.name.toLowerCase());
 
-      // A form is covered when the spec references its action, or names a field of it.
+      // A form is covered when a spec VISITS THIS PAGE and references the form's action or
+      // names one of its fields.
+      //
+      // The page visit used to not be required, and matching on a bare field name made the
+      // measure blind to which site a spec was written for. Measured on a banking target
+      // with no spec of its own: forms read 74% and controls 69%, because the demo suite
+      // mentions "username", "password" and "login" and every login form on earth has
+      // those. A spec that never navigates to a page is not testing the form on it.
       let hit =
-        (action.length > 1 && specs.text.includes(action)) ||
-        fieldsNamed.some((n) => n.length > 2 && specs.text.includes(n));
+        inSpec &&
+        ((action.length > 1 && specs.text.includes(action)) ||
+          fieldsNamed.some((n) => n.length > 2 && specs.text.includes(n)));
 
       // An anonymous form - no action, no named fields - offers nothing to key on, so the
       // rules above can NEVER credit it no matter how thoroughly it is tested. /checkboxes
@@ -448,7 +456,10 @@ export function computeCoverage(
 
     for (const label of parts.buttons.values()) {
       controlsTotal++;
-      if (specs.text.includes(label.toLowerCase())) controlsCovered++;
+      // Same requirement as forms: the label alone is not evidence. "Login", "Submit" and
+      // "Continue" appear in every suite ever written, so a bare substring test credited a
+      // banking target's controls to specs written for an unrelated demo site.
+      if (inSpec && specs.text.includes(label.toLowerCase())) controlsCovered++;
       else {
         gaps.push({
           kind: "control",
