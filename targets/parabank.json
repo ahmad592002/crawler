@@ -1,0 +1,99 @@
+{
+  "baseUrl": "https://parabank.parasoft.com/parabank/index.htm",
+  "allowedOrigins": [
+    "https://parabank.parasoft.com"
+  ],
+  "include": [
+    "^https://parabank\\.parasoft\\.com/parabank/"
+  ],
+  "exclude": [
+    "/logout",
+    "\\.pdf$",
+    "\\.zip$",
+    "/basic_auth",
+    "/digest_auth",
+    "/download",
+    "/redirector",
+    "/status_codes/"
+  ],
+  "maxPages": 50,
+  "maxDepth": 4,
+  "concurrency": 2,
+  "navTimeoutMs": 90000,
+  "maxRuntimeMs": 1200000,
+  "blockDomains": [
+    "google-analytics.com",
+    "googletagmanager.com",
+    "facebook.net",
+    "hotjar.com",
+    "doubleclick.net",
+    "optimizely.com",
+    "log.optimizely.com"
+  ],
+  "denyList": [
+    "delete",
+    "remove",
+    "destroy",
+    "erase",
+    "wipe",
+    "purge",
+    "drop",
+    "deactivate",
+    "disable account",
+    "revoke",
+    "reset all",
+    "empty cart",
+    "empty trash",
+    "cancel subscription",
+    "close account",
+    "unsubscribe",
+    "pay",
+    "purchase",
+    "checkout",
+    "place order",
+    "buy now",
+    "confirm delete",
+    "yes, delete",
+    "yes, i am sure",
+    "yes, i'm sure",
+    "transfer",
+    "transfer funds",
+    "wire",
+    "withdraw",
+    "deposit",
+    "send money",
+    "pay bill",
+    "bill pay",
+    "apply now",
+    "apply for a loan",
+    "request loan",
+    "submit application",
+    "open new account",
+    "delete account",
+    "close",
+    "deregister",
+    "cancel order",
+    "cancel"
+  ],
+  "denyUrlExceptions": [],
+  "emailPattern": "{GMAIL_LOCAL}+{runId}-{n}@gmail.com",
+  "emailProvider": "mailtm",
+  "captureHttpHistory": false,
+  "captureMaxBodyBytes": 2000000,
+  "captureOffOrigin": false,
+  "testWorkers": 2,
+  "personas": [
+    {
+      "id": "alice",
+      "role": "customer",
+      "username": "john",
+      "password": "demo"
+    },
+    {
+      "id": "bob",
+      "role": "customer",
+      "username": "john",
+      "password": "demo"
+    }
+  ]
+}

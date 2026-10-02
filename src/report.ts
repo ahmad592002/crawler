@@ -7,10 +7,10 @@
  */
 import { existsSync, readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { ROOT, loadConfig } from "./config.js";
+import { ROOT, loadConfig, OUT as CONFIG_OUT } from "./config.js";
 import type { PageRecord } from "./crawl.js";
 
-const DEFAULT_OUT = resolve(ROOT, "output");
+const DEFAULT_OUT = CONFIG_OUT;
 
 /**
  * The directory this render reads from and writes to.

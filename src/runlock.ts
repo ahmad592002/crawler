@@ -19,9 +19,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
-import { ROOT } from "./config.js";
+import { ROOT, OUT } from "./config.js";
 
-const OUT = resolve(ROOT, "output");
 
 export interface LockInfo {
   pid: number;

@@ -12,9 +12,8 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { BrowserContext, Response } from "playwright";
-import { ROOT, isAllowedUrl, type QaConfig } from "./config.js";
+import { ROOT, isAllowedUrl, type QaConfig, OUT } from "./config.js";
 
-const OUT = resolve(ROOT, "output");
 /**
  * The capture is written PER MODE, mirroring pages.jsonl / pages.auth.jsonl.
  *

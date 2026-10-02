@@ -5,6 +5,27 @@ import { z } from "zod";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * Where this run reads its config and writes its artifacts.
+ *
+ * Both were pinned to the checkout, which meant one checkout could only ever hold one
+ * target: a second site would overwrite the first one's pages.jsonl, findings, history
+ * and lock. Testing more than one site at a time is the point of a QA agent, so both
+ * are overridable:
+ *
+ *   QA_CONFIG=targets/shop.json QA_OUT=output/shop npm run crawl
+ *
+ * A relative QA_OUT resolves against the checkout, so the artifacts stay inside the
+ * project and .gitignore keeps covering them. Defaults are exactly the old behaviour.
+ */
+export const CONFIG_PATH = process.env.QA_CONFIG?.trim()
+  ? resolve(ROOT, process.env.QA_CONFIG.trim())
+  : resolve(ROOT, "qa.config.json");
+
+export const OUT = process.env.QA_OUT?.trim()
+  ? resolve(ROOT, process.env.QA_OUT.trim())
+  : resolve(ROOT, "output");
+
 const ConfigSchema = z.object({
   baseUrl: z.string(),
   allowedOrigins: z.array(z.string()),
@@ -60,7 +81,7 @@ const ConfigSchema = z.object({
 
 export type QaConfig = z.infer<typeof ConfigSchema>;
 
-export function loadConfig(path = resolve(ROOT, "qa.config.json")): QaConfig {
+export function loadConfig(path = CONFIG_PATH): QaConfig {
   return ConfigSchema.parse(JSON.parse(readFileSync(path, "utf8")));
 }
 

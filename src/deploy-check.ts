@@ -17,11 +17,10 @@
  */
 import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
+import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import type { PageRecord } from "./crawl.js";
 import { readHistory, type HttpExchange } from "./http-history.js";
 
-const OUT = resolve(ROOT, "output");
 const FINDINGS = resolve(OUT, "deploy-findings.jsonl");
 
 export type Severity = "critical" | "high" | "medium" | "low";

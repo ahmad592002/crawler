@@ -11,11 +11,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "n
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
+import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import { recordHistory, writeBurpXml, drainHistory, historyJsonl, historyXml } from "./http-history.js";
 import { acquireLock } from "./runlock.js";
 
-const OUT = resolve(ROOT, "output");
 const SHOTS = resolve(OUT, "screenshots");
 const STATE = resolve(OUT, "auth", "state.json");
 

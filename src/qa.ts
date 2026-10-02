@@ -13,9 +13,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT } from "./config.js";
+import { ROOT, OUT } from "./config.js";
 
-const OUT = resolve(ROOT, "output");
 
 interface Step {
   name: string;

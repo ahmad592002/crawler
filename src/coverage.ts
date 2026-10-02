@@ -16,10 +16,9 @@
  */
 import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT } from "./config.js";
+import { ROOT, OUT } from "./config.js";
 import type { PageRecord, FormInfo } from "./crawl.js";
 
-const OUT = resolve(ROOT, "output");
 const TESTS = resolve(ROOT, "tests");
 
 export interface FeatureEntry {

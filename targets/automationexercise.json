@@ -1,0 +1,89 @@
+{
+  "baseUrl": "https://automationexercise.com",
+  "allowedOrigins": [
+    "https://automationexercise.com"
+  ],
+  "include": [
+    ".*"
+  ],
+  "exclude": [
+    "/logout",
+    "\\.pdf$",
+    "\\.zip$",
+    "/basic_auth",
+    "/digest_auth",
+    "/download",
+    "/redirector",
+    "/status_codes/"
+  ],
+  "maxPages": 60,
+  "maxDepth": 6,
+  "concurrency": 2,
+  "navTimeoutMs": 90000,
+  "maxRuntimeMs": 1200000,
+  "blockDomains": [
+    "google-analytics.com",
+    "googletagmanager.com",
+    "facebook.net",
+    "hotjar.com",
+    "doubleclick.net",
+    "optimizely.com",
+    "log.optimizely.com"
+  ],
+  "denyList": [
+    "delete",
+    "remove",
+    "destroy",
+    "erase",
+    "wipe",
+    "purge",
+    "drop",
+    "deactivate",
+    "disable account",
+    "revoke",
+    "reset all",
+    "empty cart",
+    "empty trash",
+    "cancel subscription",
+    "close account",
+    "unsubscribe",
+    "pay",
+    "purchase",
+    "checkout",
+    "place order",
+    "buy now",
+    "confirm delete",
+    "yes, delete",
+    "yes, i am sure",
+    "yes, i'm sure",
+    "delete account",
+    "close",
+    "deregister",
+    "cancel order",
+    "cancel",
+    "subscribe"
+  ],
+  "denyUrlExceptions": [
+    "/add_remove_elements/?$"
+  ],
+  "emailPattern": "{GMAIL_LOCAL}+{runId}-{n}@gmail.com",
+  "emailProvider": "mailtm",
+  "captureHttpHistory": false,
+  "captureMaxBodyBytes": 2000000,
+  "captureOffOrigin": false,
+  "testWorkers": 2,
+  "personas": [
+    {
+      "id": "alice",
+      "role": "owner",
+      "username": "tomsmith",
+      "password": "SuperSecretPassword!"
+    },
+    {
+      "id": "bob",
+      "role": "member",
+      "username": "tomsmith",
+      "password": "SuperSecretPassword!"
+    }
+  ]
+}

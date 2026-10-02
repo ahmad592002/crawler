@@ -17,11 +17,10 @@
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { request, type APIRequestContext } from "playwright";
-import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig } from "./config.js";
+import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import { knownPersonas, type Persona } from "./personas.js";
 import type { PageRecord } from "./crawl.js";
 
-const OUT = resolve(ROOT, "output");
 const FINDINGS = resolve(OUT, "authz-findings.jsonl");
 
 export interface AuthzFinding {

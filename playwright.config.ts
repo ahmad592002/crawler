@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 import { cpus } from "node:os";
-import { loadConfig } from "./src/config.js";
+import { resolve } from "node:path";
+import { loadConfig, OUT } from "./src/config.js";
 
 const cfg = loadConfig();
 
@@ -13,11 +14,11 @@ export default defineConfig({
   retries: 1,
   reporter: [
     ["list"],
-    ["html", { outputFolder: "output/pw-report", open: "never" }],
+    ["html", { outputFolder: resolve(OUT, "pw-report"), open: "never" }],
     // src/report.ts reads this to show per-spec results in the HTML report.
-    ["json", { outputFile: "output/pw-results.json" }],
+    ["json", { outputFile: resolve(OUT, "pw-results.json") }],
   ],
-  outputDir: "output/test-results",
+  outputDir: resolve(OUT, "test-results"),
   timeout: 240_000,
   // This target regularly needs ~8s to navigate; the 5s default fires mid-navigation.
   expect: { timeout: 15_000 },
@@ -40,7 +41,7 @@ export default defineConfig({
       dependencies: ["setup"],
       use: {
         ...devices["Desktop Chrome"],
-        storageState: "output/auth/state.json",
+        storageState: resolve(OUT, "auth/state.json"),
       },
     },
   ],
