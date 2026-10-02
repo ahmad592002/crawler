@@ -17,9 +17,10 @@
  * body of `signUpAndLogIn` for a real target; everything around it stays.
  */
 import { test as setup, expect, safeClick, safeGoto } from "./fixtures.js";
+import { logIn } from "./login.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT, loadConfig } from "../src/config.js";
+import { loadConfig, OUT } from "../src/config.js";
 import { loadPersonas, describePersona, type Persona } from "../src/personas.js";
 import { waitForEmail, extractCode, extractLinks } from "../src/email/lib.js";
 
@@ -33,7 +34,11 @@ setup("create personas and save a session for each", async ({ browser }) => {
     return;
   }
 
-  mkdirSync(resolve(ROOT, "output/auth"), { recursive: true });
+  // OUT, not ROOT: these must follow QA_OUT or the session is written to the default
+  // output/ while playwright.config.ts reads storageState from the target's own
+  // directory - every non-default target would then run signed out while the setup
+  // project reported success.
+  mkdirSync(resolve(OUT, "auth"), { recursive: true });
   for (const p of personas) console.log(`  ${describePersona(p)}`);
 
   // Sequentially: a signup flow that races itself against the same site is a bad first
@@ -58,16 +63,16 @@ async function signUpAndLogIn(
   page: import("@playwright/test").Page,
   persona: Persona,
 ): Promise<void> {
-  // --- demo target: one fixed account, no signup, no email ------------------
-  // Replace this block for a real site. It is kept deliberately small and obvious.
-  const fixedUser = cfg.personas?.find((p) => p.id === persona.id)?.username ?? "tomsmith";
+  // A persona with a configured username logs in as that fixed account. Where the target
+  // has no signup - the demo site - this is the whole flow. The login SHAPE is no longer
+  // written here: it comes from the target's config via tests/login.ts, so a new target
+  // needs a config block rather than an edit to this file.
+  const configured = cfg.personas?.find((p) => p.id === persona.id)?.username;
+  const username = configured ?? persona.email;
 
-  await safeGoto(page, "/login");
-  await page.getByLabel("Username").fill(fixedUser);
-  await page.getByLabel("Password").fill(persona.password);
-  await safeClick(page, "Login");
-  await page.waitForURL(/\/secure$/);
-  await expect(page.getByText("You logged into a secure area!")).toBeVisible();
+  // The per-persona timeout is shorter than the auth setup's: several personas run in
+  // sequence here, and one unreachable target should not burn three minutes per identity.
+  await logIn(page, username, persona.password, 60_000);
 }
 
 /**

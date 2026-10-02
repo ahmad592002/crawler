@@ -20,6 +20,7 @@ import { resolve } from "node:path";
 import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import type { PageRecord } from "./crawl.js";
 import { readHistory, type HttpExchange } from "./http-history.js";
+import { fingerprint, overlap, SAME_PAGE, looksLikeHtml, htmlIsWrongFor } from "./fingerprint.js";
 
 const FINDINGS = resolve(OUT, "deploy-findings.jsonl");
 
@@ -99,15 +100,44 @@ const PROBES: Probe[] = [
  * A site that answers 200 to everything makes every probe a false positive. Establish the
  * baseline first with a path that certainly does not exist.
  */
-async function catchAllBaseline(base: string, timeoutMs: number): Promise<{ status: number; length: number } | null> {
-  const probe = `${base}/__qa_agent_definitely_not_here_${Date.now().toString(36)}`;
-  try {
-    const res = await fetch(probe, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
-    const body = await res.text();
-    return { status: res.status, length: body.length };
-  } catch {
-    return null;
+/**
+ * Fetch two nonsense paths and decide whether this origin answers 200 to anything.
+ *
+ * Two, not one: a single sample cannot tell a catch-all shell from a genuine one-off
+ * page, and comparing the two samples to each other is what proves the body is the same
+ * regardless of the path asked for.
+ */
+async function catchAllBaseline(
+  base: string,
+  timeoutMs: number,
+): Promise<{ print: Set<string>; length: number } | null> {
+  const bodies: string[] = [];
+  for (const tag of ["alpha", "beta"]) {
+    // Retry: a single timed-out baseline fetch disables the catch-all guard for the whole
+    // run, and then every probe that answers 200 is reported. That is not a hypothetical -
+    // one flaky moment on a throttling target produced 10 "exposed" findings, 4 critical,
+    // on a site where the guard works perfectly when the baseline is actually obtained.
+    let body: string | null = null;
+    for (let attempt = 0; attempt < 3 && body === null; attempt++) {
+      const url = `${base}/__qa_agent_definitely_not_here_${tag}_${Date.now().toString(36)}`;
+      try {
+        const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+        // A non-200 is a definite answer, not a flake: this origin does not answer 200 to
+        // everything, so the guard is genuinely not needed. Stop and say so.
+        if (res.status !== 200) return null;
+        body = await res.text();
+      } catch {
+        if (attempt === 2) return null;
+      }
+    }
+    if (body === null) return null;
+    bodies.push(body);
   }
+  const [a, b] = bodies as [string, string];
+  // If the two nonsense paths disagree, this is not a stable catch-all and a probe's own
+  // 200 means something. Falling back to null is the safe direction: probes are reported.
+  if (overlap(fingerprint(a), fingerprint(b)) < SAME_PAGE) return null;
+  return { print: fingerprint(a), length: a.length };
 }
 
 async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFinding[]> {
@@ -115,10 +145,19 @@ async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFindin
   const found: DeployFinding[] = [];
   const baseline = await catchAllBaseline(base, timeoutMs);
 
-  if (baseline && baseline.status === 200) {
+  if (baseline) {
     console.log(
-      `  note: this origin answers 200 to a nonsense path (${baseline.length} bytes) - ` +
-        `probes are confirmed against body content, and unconfirmable ones are skipped.`,
+      `  note: this origin answers 200 to any path (shell is ~${baseline.length} bytes) - ` +
+        `probes are matched against that page's content, not its size.`,
+    );
+  } else {
+    // Say this out loud. Either the origin 404s properly - the good case, and the guard is
+    // not needed - or the baseline could not be fetched at all, in which case every probe
+    // below is UNGUARDED and a soft-404 site will produce a page of invented criticals.
+    // Silence here is how 19 false findings once looked like a clean, successful scan.
+    console.log(
+      `  note: no catch-all baseline (this origin did not answer 200 to a nonsense path, ` +
+        `or could not be reached). Probe results are not filtered against a shell page.`,
     );
   }
 
@@ -136,15 +175,21 @@ async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFindin
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
       const body = (await res.text()).slice(0, 20000);
 
-      // A catch-all 200 of the same size as our nonsense probe is the SPA index page.
-      const looksLikeCatchAll =
-        baseline?.status === 200 && Math.abs(body.length - baseline.length) < 64;
+      // An HTML body is proof of nothing when the path names a .zip, .sql, .sqlite,
+      // .lock or .bak - those cannot BE an html document, so what came back is the
+      // server's error or index page. This needs no baseline and catches the most
+      // common false positive in path probing on its own.
+      if (htmlIsWrongFor(probe.path) && looksLikeHtml(contentType, body)) continue;
 
-      if (probe.confirm) {
-        if (!probe.confirm(body, contentType)) continue;
-      } else if (looksLikeCatchAll) {
-        continue;
-      }
+      // Otherwise compare CONTENT against the catch-all page. The old test was a
+      // 64-byte length window, which missed a shell that varied 130 bytes across 19
+      // probes and so reported all 19 as exposed, 7 of them critical.
+      if (baseline && overlap(fingerprint(body), baseline.print) >= SAME_PAGE) continue;
+
+      // The guard above runs BEFORE confirm, deliberately. A probe carrying a confirm
+      // predicate used to skip the catch-all check altogether, so a loose predicate
+      // satisfied by the shell would report a finding on every site that has one.
+      if (probe.confirm && !probe.confirm(body, contentType)) continue;
 
       found.push({
         id: `D-P${String(++n).padStart(2, "0")}`,

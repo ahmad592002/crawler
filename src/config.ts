@@ -63,6 +63,43 @@ const ConfigSchema = z.object({
    * Identities for features that only exist between two people - sharing, invitations,
    * messaging, admin-over-member. Each gets its own mailbox and its own saved session.
    */
+  /**
+   * How to log in to THIS target.
+   *
+   * The login was hardcoded to the demo site in six separate places - the /login path,
+   * the "Username" and "Password" label text, the "Login" button name, a /secure success
+   * URL and the literal success sentence - so pointing the agent at any other site meant
+   * editing tests/auth.setup.ts. Credentials were already configurable, which made the
+   * limitation easy to miss: the one part that looked parameterised was the only part
+   * that was.
+   *
+   * Everything here is optional and defaults to the demo target's shape, so existing
+   * configs keep working untouched. Labels are matched case-insensitively as regular
+   * expressions, because "Username", "User Name" and "Email" are the same field.
+   */
+  login: z
+    .object({
+      /** Path to the sign-in page, relative to baseUrl. */
+      path: z.string().default("/login"),
+      /** Accessible label of the identifier field. */
+      usernameLabel: z.string().default("Username"),
+      passwordLabel: z.string().default("Password"),
+      /** Accessible name of the submit control. */
+      submitLabel: z.string().default("Login"),
+      /**
+       * A URL pattern that proves the login worked, as a regular expression source.
+       * Checked before successText, because a site that redirects is the common case.
+       */
+      successUrl: z.string().default("/secure$"),
+      /**
+       * Text that proves the login worked. Optional: many sites show nothing specific,
+       * and asserting on a sentence that does not exist turns a working login into a
+       * 30-second timeout that reads as a broken site.
+       */
+      successText: z.string().optional(),
+    })
+    .optional(),
+
   personas: z
     .array(
       z.object({

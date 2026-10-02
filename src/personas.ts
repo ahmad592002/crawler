@@ -15,10 +15,13 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT, loadConfig, env, type PersonaConfig } from "./config.js";
+import { loadConfig, env, type PersonaConfig, OUT } from "./config.js";
 import { getProvider } from "./email/lib.js";
 
-const AUTH_DIR = resolve(ROOT, "output", "auth");
+// Follows QA_OUT. A persona store shared across targets would hand one site's saved
+// mailbox and password to another, and the store is discarded when baseUrl changes -
+// so two targets sharing it would each wipe the other's personas on every run.
+const AUTH_DIR = resolve(OUT, "auth");
 const STORE = resolve(AUTH_DIR, "personas.json");
 
 export interface Persona {

@@ -141,6 +141,12 @@ export function templateOf(url: string): string {
       if (/^\d+$/.test(seg)) return ":id";
       if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return ":uuid";
       if (/^[0-9a-f]{24,}$/i.test(seg)) return ":hash";
+      // A ULID: 26 characters of Crockford base32, which is digits plus uppercase
+      // letters with I, L, O and U left out. It matches none of the rules above - not
+      // all digits, not a uuid, and not hex, because it carries letters past F - so 35
+      // of 46 pages on an SPA target came back as 35 separate templates, each its own
+      // "untested page", and the templates figure read 2%.
+      if (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(seg)) return ":ulid";
       // Slugs that merely end in an id: product-123 -> product-:id
       if (/^[a-z0-9-]*-\d+$/i.test(seg)) return seg.replace(/-\d+$/, "-:id");
       return seg;

@@ -106,6 +106,28 @@ test("templateOf collapses ids but NOT pagination", () => {
   );
 });
 
+
+test("templateOf collapses a ULID, which is neither digits nor hex", () => {
+  // 26 characters of Crockford base32. It matched none of the id rules - not all digits,
+  // not a uuid, and not hex because it carries letters past F - so on an SPA target 35 of
+  // 46 crawled pages came back as 35 separate templates, each counted as its own untested
+  // page, and the templates coverage figure read 2%.
+  const a = "https://t.test/product/01M3XCAC8QVZ53KPRDYNSB7ZGJ";
+  const b = "https://t.test/product/01M3XCAC906ZH2WZ7YZGSBYHRQ";
+  assert.equal(templateOf(a), templateOf(b));
+  assert.equal(templateOf(a), "https://t.test/product/:ulid");
+
+  // Crockford base32 leaves out I, L, O and U, and a ULID is exactly 26 characters, so a
+  // word of the same length is not swallowed.
+  const slug = "https://t.test/product/COMBINATIONPLIERSOURBLUE26";
+  assert.notEqual(templateOf(slug), "https://t.test/product/:ulid");
+  assert.equal(
+    templateOf("https://t.test/product/combination-pliers"),
+    "https://t.test/product/combination-pliers",
+    "a human-readable slug is a page in its own right, not an id",
+  );
+});
+
 // ------------------------------------------------------------------ Burp XML
 
 const exchange: HttpExchange = {

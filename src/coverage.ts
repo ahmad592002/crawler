@@ -192,10 +192,12 @@ export function visitsPath(haystack: string, path: string): boolean {
   const ID = "(?:\\d+|\\$\\{[^}]*\\})";
   const UUID = "(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\\$\\{[^}]*\\})";
   const HASH = "(?:[0-9a-f]{24,}|\\$\\{[^}]*\\})";
+  const ULID = "(?:[0-9A-HJKMNP-TV-Z]{26}|\\$\\{[^}]*\\})";
   const p = path
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     // Longest placeholder first, or :id would consume the tail of the others.
     .replace(/:uuid/g, UUID)
+    .replace(/:ulid/g, ULID)
     .replace(/:hash/g, HASH)
     .replace(/:id/g, ID);
 

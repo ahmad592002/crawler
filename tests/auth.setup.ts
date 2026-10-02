@@ -6,32 +6,28 @@
  * email would insert the email steps here - createInbox() before submitting the signup
  * form, then extractCode/extractLinks on what waitForEmail returns. The rest is identical.
  */
-import { test as setup, expect, safeClick, safeGoto } from "./fixtures.js";
+import { test as setup } from "./fixtures.js";
+import { logIn } from "./login.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ROOT, env } from "../src/config.js";
+import { env, OUT } from "../src/config.js";
 
-const STATE = resolve(ROOT, "output/auth/state.json");
+// OUT, not ROOT: these must follow QA_OUT or the session is written to the default
+// output/ while playwright.config.ts reads storageState from the target's own
+// directory - every non-default target would then run signed out while the setup
+// project reported success.
+const STATE = resolve(OUT, "auth/state.json");
 
 const USERNAME = env("TEST_USERNAME", "tomsmith")!;
 const PASSWORD = env("TEST_PASSWORD", "SuperSecretPassword!")!;
 
 setup("log in and save session", async ({ page }) => {
-  mkdirSync(resolve(ROOT, "output/auth"), { recursive: true });
+  mkdirSync(resolve(OUT, "auth"), { recursive: true });
 
-  await safeGoto(page, "/login");
-  await page.getByLabel("Username").fill(USERNAME);
-  await page.getByLabel("Password").fill(PASSWORD);
-  await safeClick(page, "Login");
-
-  // Wait for the navigation the click starts before asserting on content. Otherwise the
-  // assertion polls the old page and can exhaust its own timeout while the new one loads.
-  //
-  // The setup project gates every other spec, so a single slow response here reports as
-  // "27 tests did not run" and looks like a broken suite. Give the login its own generous
-  // budget rather than inheriting the default and failing the whole run over one timeout.
-  await page.waitForURL(/\/secure$/, { timeout: 180_000 });
-  await expect(page.getByText("You logged into a secure area!")).toBeVisible({ timeout: 30_000 });
+  // The login shape comes from the target's config now - see tests/login.ts. The path,
+  // the field labels, the submit control and the success signal were all hardcoded here
+  // to the demo site, so this file had to be edited for every new target.
+  await logIn(page, USERNAME, PASSWORD);
 
   await page.context().storageState({ path: STATE });
 });
