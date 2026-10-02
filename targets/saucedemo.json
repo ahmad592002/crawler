@@ -84,5 +84,12 @@
       "username": "problem_user",
       "password": "secret_sauce"
     }
-  ]
+  ],
+  "login": {
+    "path": "/",
+    "usernameLabel": "Username",
+    "passwordLabel": "Password",
+    "submitLabel": "Login",
+    "successUrl": "/inventory.html$"
+  }
 }

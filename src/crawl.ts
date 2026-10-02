@@ -7,13 +7,14 @@
  * Resumable: every page is appended to the .jsonl the moment it is done, and a restart
  * skips URLs already recorded there.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import { recordHistory, writeBurpXml, drainHistory, historyJsonl, historyXml } from "./http-history.js";
 import { acquireLock } from "./runlock.js";
+import { judgeCrawl } from "./crawl-verdict.js";
 
 const SHOTS = resolve(OUT, "screenshots");
 const STATE = resolve(OUT, "auth", "state.json");
@@ -641,6 +642,26 @@ async function main(): Promise<void> {
   };
 
   enqueue(base, 0);
+
+  // In auth mode, also start from wherever the login landed. A login-gated app often
+  // serves the sign-in form at its root even with a valid session - the post-login
+  // entry point is reachable only by submitting the form - so seeding baseUrl alone
+  // produced an authenticated crawl of exactly one page: the login screen again.
+  if (mode === "auth") {
+    const landingFile = resolve(OUT, "auth", "landing.json");
+    if (existsSync(landingFile)) {
+      try {
+        const { url } = JSON.parse(readFileSync(landingFile, "utf8")) as { url?: unknown };
+        const landing = typeof url === "string" ? normalizeUrl(url) : null;
+        if (landing && inScope(landing, cfg)) {
+          enqueue(landing, 0);
+          console.log(`  auth entry point from the saved login: ${landing}`);
+        }
+      } catch {
+        /* a corrupt landing file must not stop the crawl */
+      }
+    }
+  }
   for (const seed of await sitemapSeeds(base, cfg)) enqueue(seed, 1);
   console.log(`Seeded ${queue.length} URL(s). Crawling with concurrency ${cfg.concurrency} ...`);
 
@@ -753,6 +774,18 @@ async function main(): Promise<void> {
   console.log(`pages crawled: ${records.length}${done.size ? ` (+${done.size} from a previous run)` : ""}`);
   console.log(`total time:    ${totalSec}s`);
   console.log(`templates:     ${new Set(records.map((r) => r.template)).size}`);
+
+  // Judge the crawl before anything downstream is allowed to compute a percentage
+  // from it. A one-page crawl of a login-gated app used to report "pages crawled: 1"
+  // and nothing else, and coverage then produced a figure from that single page.
+  const verdict = judgeCrawl(records, mode);
+  writeFileSync(resolve(OUT, `crawl-status.${mode}.json`), `${JSON.stringify(verdict, null, 2)}\n`);
+  if (verdict.verdict !== "ok") {
+    console.log(`\n${"!".repeat(60)}`);
+    console.log(`THIS CRAWL PROVED LITTLE: ${verdict.verdict}`);
+    console.log(`  ${verdict.reason}`);
+    console.log(`${"!".repeat(60)}`);
+  }
   console.log(`pages w/ errors: ${withErrors.length}`);
   for (const r of withErrors.slice(0, 10)) {
     const bits = [

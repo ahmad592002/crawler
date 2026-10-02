@@ -84,6 +84,19 @@ const ConfigSchema = z.object({
       /** Accessible label of the identifier field. */
       usernameLabel: z.string().default("Username"),
       passwordLabel: z.string().default("Password"),
+      /**
+       * Credentials for this target.
+       *
+       * Optional, and env wins over them: TEST_USERNAME and TEST_PASSWORD keep real
+       * secrets out of a committed config. These exist because the setup project read
+       * ONLY the env vars, each with the demo site's value as its default, so pointing
+       * the agent at a new target sent tomsmith/SuperSecretPassword! to it and waited
+       * three minutes for a navigation that was never going to happen.
+       *
+       * Fine to commit for a public demo account. For anything real, use the env vars.
+       */
+      username: z.string().optional(),
+      password: z.string().optional(),
       /** Accessible name of the submit control. */
       submitLabel: z.string().default("Login"),
       /**

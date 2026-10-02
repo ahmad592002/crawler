@@ -59,6 +59,15 @@ interface CoverageSummary {
   templates?: CoverageBucket;
   forms?: CoverageBucket;
   controls?: CoverageBucket;
+  /**
+   * Why these numbers may be worthless: one entry per crawl that went nowhere.
+   *
+   * Typed as unknown and read through strArr, like every other field here. A JSONL or JSON
+   * file on disk is untrusted input - a non-array `personas` once took the whole report
+   * down because the code used `?? []`, which guards null but not a string.
+   */
+  crawlWarnings?: unknown;
+  inconclusive?: unknown;
 }
 
 /** A single JSON file, or null. Absence is a state the report renders, not an error. */
@@ -571,6 +580,18 @@ ${
 }
 
 <h2>Test coverage</h2>
+${
+  strArr(coverage?.crawlWarnings).length
+    ? `<div class="empty" style="border-color:#b45309;color:#92400e">
+         <strong>These percentages are measured against a crawl that went nowhere.</strong>
+         ${strArr(coverage?.crawlWarnings)
+           .map((w) => `<div>${esc(w)}</div>`)
+           .join("")}
+         <div style="margin-top:6px">A crawl that never got past the sign-in screen scores
+         100% of the one page it saw. Treat the figures below as arithmetic, not coverage.</div>
+       </div>`
+    : ""
+}
 ${
   coverage
     ? `<div class="tablewrap"><table><thead><tr><th>What</th><th>Covered</th><th>Share</th></tr></thead><tbody>

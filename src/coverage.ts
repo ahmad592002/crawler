@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT, OUT } from "./config.js";
 import type { PageRecord, FormInfo } from "./crawl.js";
+import type { CrawlStatus } from "./crawl-verdict.js";
 
 const TESTS = resolve(ROOT, "tests");
 
@@ -494,9 +495,32 @@ function main(): void {
   }
 
   const cov = computeCoverage(pages, features, specs);
-  writeFileSync(resolve(OUT, "coverage.json"), `${JSON.stringify(cov, null, 2)}\n`);
+
+  // Gather the crawl verdicts BEFORE writing coverage.json, so the file carries them. The
+  // percentages are arithmetic over whatever was reachable, and over a one-page inventory
+  // that is a number dressed up as a result - report.html would otherwise render a bare
+  // "100%" for a crawl that never got past a login screen.
+  const crawlWarnings: string[] = [];
+  for (const mode of ["anon", "auth"]) {
+    const f = resolve(OUT, `crawl-status.${mode}.json`);
+    if (!existsSync(f)) continue;
+    try {
+      const s = JSON.parse(readFileSync(f, "utf8")) as CrawlStatus;
+      if (s.verdict !== "ok") {
+        crawlWarnings.push(`${mode} crawl (${s.verdict}): ${s.reason}`);
+      }
+    } catch {
+      /* a corrupt status file must not take the report down */
+    }
+  }
+
+  writeFileSync(
+    resolve(OUT, "coverage.json"),
+    `${JSON.stringify({ ...cov, inconclusive: crawlWarnings.length > 0, crawlWarnings }, null, 2)}\n`,
+  );
 
   console.log(`Coverage against ${cov.specCount} spec file(s)\n`);
+  for (const w of crawlWarnings) console.log(`  WARNING - ${w}`);
   console.log(`  templates  ${bar(cov.templates.covered, cov.templates.total)}  ${pct(cov.templates.covered, cov.templates.total)}   ${cov.templates.covered}/${cov.templates.total}`);
   console.log(`  forms      ${bar(cov.forms.covered, cov.forms.total)}  ${pct(cov.forms.covered, cov.forms.total)}   ${cov.forms.covered}/${cov.forms.total}`);
   console.log(`  controls   ${bar(cov.controls.covered, cov.controls.total)}  ${pct(cov.controls.covered, cov.controls.total)}   ${cov.controls.covered}/${cov.controls.total}`);
