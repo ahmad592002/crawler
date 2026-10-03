@@ -65,7 +65,7 @@
   "captureHttpHistory": false,
   "captureMaxBodyBytes": 2000000,
   "captureOffOrigin": false,
-  "testWorkers": 2,
+  "testWorkers": 1,
   "personas": [
     {
       "id": "alice",

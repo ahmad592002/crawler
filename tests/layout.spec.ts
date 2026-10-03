@@ -143,7 +143,11 @@ test.describe("jQuery UI menu", () => {
       });
 
     try {
-      await expect.poll(async () => (await upgraded()).widget, { timeout: 30_000 }).toBe(true);
+      // 45s, and measured rather than guessed: jquery-ui.js on this target is 470KB - the
+      // largest asset on the site - and a preflight check timed it at 26,849ms immediately
+      // after a suite run. A 30s budget sat right on that edge, which is why this test
+      // failed intermittently while the page was working.
+      await expect.poll(async () => (await upgraded()).widget, { timeout: 45_000 }).toBe(true);
     } catch {
       const s = await upgraded();
       if (!s.jQuery || !s.jQueryUi) {

@@ -62,6 +62,18 @@ jobs:
       - name: Unit tests (offline)
         run: npx tsx --test src/*.test.ts
 
+      # Is the target actually healthy? Not a formality: a run once failed twenty tests
+      # across eight unrelated spec files because the target served its HTML in under a
+      # second while every script and stylesheet answered 503. Pages loaded and did
+      # nothing, and every failure read as a separate regression.
+      #
+      # continue-on-error so a degraded target does not block the pipeline - the point is
+      # that the annotation is sitting right above the failures when someone reads the log,
+      # instead of them spending an afternoon looking for a bug that is not theirs.
+      - name: Preflight (is the target up, including its assets?)
+        continue-on-error: true
+        run: npm run preflight
+
       - name: Run QA pipeline
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
