@@ -205,3 +205,72 @@ test("a setup file is not mistaken for a missing spec", () => {
   );
   assert.doesNotMatch(html, /do not describe the current suite/);
 });
+
+// ------------------------------------------------------------- flaky is not green
+
+/**
+ * A flaky test has ok: true, because it passed on a retry.
+ *
+ * A real run came back "87 passed, 4 skipped" with TEN tests that had only passed on a
+ * second attempt, and the report rendered every one of them as an ordinary pass. The whole
+ * suite looked green. Worse, the terminal summary I was reading had been truncated by
+ * `tail`, so the two genuine failures were invisible too - the json was the only honest
+ * account of that run.
+ */
+function resultsWith(specs: { title: string; ok: boolean; flaky?: boolean }[]): string {
+  return JSON.stringify({
+    stats: { startTime: new Date().toISOString() },
+    suites: [
+      {
+        title: "a.spec.ts",
+        file: "a.spec.ts",
+        specs: specs.map((s) => ({
+          title: s.title,
+          ok: s.ok,
+          tests: [{ status: s.flaky ? "flaky" : s.ok ? "expected" : "unexpected" }],
+        })),
+      },
+    ],
+  });
+}
+
+test("a test that only passed on a retry is labelled flaky, not pass", () => {
+  const html = renderWithSuite(
+    {
+      "pages.jsonl": MINIMAL_PAGE + "\n",
+      "pw-results.json": resultsWith([
+        { title: "steady", ok: true },
+        { title: "racy", ok: true, flaky: true },
+      ]),
+    },
+    { "a.spec.ts": "// ran" },
+  );
+
+  assert.match(html, /1 test\(s\) only passed on a retry/);
+  assert.match(html, /sev high">flaky/, "the row itself has to say so, not just a banner");
+  assert.match(html, /sev low">pass/, "the steady test is still an ordinary pass");
+});
+
+test("a run with no flakes shows no flaky banner at all", () => {
+  // It has to stay quiet when things are fine, or it becomes another line people skip.
+  const html = renderWithSuite(
+    {
+      "pages.jsonl": MINIMAL_PAGE + "\n",
+      "pw-results.json": resultsWith([{ title: "steady", ok: true }]),
+    },
+    { "a.spec.ts": "// ran" },
+  );
+  assert.doesNotMatch(html, /only passed on a retry/);
+  assert.doesNotMatch(html, /sev high">flaky/);
+});
+
+test("a genuine failure still outranks flakiness", () => {
+  const html = renderWithSuite(
+    {
+      "pages.jsonl": MINIMAL_PAGE + "\n",
+      "pw-results.json": resultsWith([{ title: "broken", ok: false, flaky: true }]),
+    },
+    { "a.spec.ts": "// ran" },
+  );
+  assert.match(html, /sev critical">fail/, "a failing test is a failure first");
+});

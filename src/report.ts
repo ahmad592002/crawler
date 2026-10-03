@@ -91,7 +91,11 @@ interface Feature {
 
 interface PwSuite {
   title: string;
-  specs?: { title: string; ok: boolean; tests?: { results?: { status: string }[] }[] }[];
+  specs?: {
+    title: string;
+    ok: boolean;
+    tests?: { status?: string; results?: { status: string }[] }[];
+  }[];
   suites?: PwSuite[];
 }
 
@@ -253,11 +257,12 @@ function testResults(): {
   total: number;
   passed: number;
   failed: number;
-  specs: { title: string; ok: boolean }[];
+  flaky: number;
+  specs: { title: string; ok: boolean; flaky: boolean }[];
   ranAt: string | null;
   warnings: string[];
 } {
-  const empty = { total: 0, passed: 0, failed: 0, specs: [], ranAt: null, warnings: [] };
+  const empty = { total: 0, passed: 0, failed: 0, flaky: 0, specs: [], ranAt: null, warnings: [] };
   const file = resolve(OUT, "pw-results.json");
   if (!existsSync(file)) return empty;
 
@@ -297,11 +302,18 @@ function testResults(): {
     }
   }
 
-  const specs: { title: string; ok: boolean }[] = [];
+  const specs: { title: string; ok: boolean; flaky: boolean }[] = [];
   const walk = (suites: PwSuite[] | undefined, prefix: string): void => {
     for (const s of suites ?? []) {
       const name = [prefix, s.title].filter(Boolean).join(" › ");
-      for (const spec of s.specs ?? []) specs.push({ title: `${name} › ${spec.title}`, ok: spec.ok });
+      for (const spec of s.specs ?? []) {
+        // A flaky test has ok: true - it passed on a retry - so a suite with ten of them
+        // renders as entirely green. That is the same silence this report has been
+        // taught to refuse everywhere else: ten tests that only pass on a second attempt
+        // is a fact about the suite, not a detail to round away.
+        const flaky = (spec.tests ?? []).some((t) => t.status === "flaky");
+        specs.push({ title: `${name} › ${spec.title}`, ok: spec.ok, flaky });
+      }
       walk(s.suites, name);
     }
   };
@@ -311,6 +323,7 @@ function testResults(): {
     total: specs.length,
     passed: specs.filter((s) => s.ok).length,
     failed: specs.filter((s) => !s.ok).length,
+    flaky: specs.filter((s) => s.flaky).length,
     specs,
     ranAt,
     warnings,
@@ -445,10 +458,17 @@ export function buildReport(outDir: string = DEFAULT_OUT): string {
     .join("");
 
   const specRows = tests.specs
-    .map(
-      (s) =>
-        `<tr><td><span class="sev ${s.ok ? "low" : "critical"}">${s.ok ? "pass" : "fail"}</span></td><td>${esc(s.title)}</td></tr>`,
-    )
+    .map((s) => {
+      // Three states, not two. A flaky test passed on a retry, so `ok` is true and it used
+      // to render as an ordinary pass - which made a run with ten of them look perfectly
+      // green. "Passed on retry" is what the reader needs to see.
+      const [cls, word] = !s.ok
+        ? ["critical", "fail"]
+        : s.flaky
+          ? ["high", "flaky"]
+          : ["low", "pass"];
+      return `<tr><td><span class="sev ${cls}">${word}</span></td><td>${esc(s.title)}</td></tr>`;
+    })
     .join("");
 
   const html = `<!doctype html>
@@ -544,7 +564,17 @@ ${
 }
 ${
   tests.total
-    ? `<div class="tablewrap"><table><thead><tr><th>Status</th><th>Spec</th></tr></thead><tbody>${specRows}</tbody></table></div>
+    ? `${
+        tests.flaky
+          ? `<div class="empty" style="border-color:#b45309;color:#92400e;margin-bottom:12px">
+               <strong>${num(tests.flaky)} test(s) only passed on a retry.</strong>
+               They are listed as "flaky" below. Either the suite is racing the
+               application, or the target is too slow or overloaded to answer reliably -
+               run <code>npm run preflight</code> to tell those apart before trusting a
+               green run.
+             </div>`
+          : ""
+      }<div class="tablewrap"><table><thead><tr><th>Status</th><th>Spec</th></tr></thead><tbody>${specRows}</tbody></table></div>
        <p class="sub" style="margin-top:10px">${
          tests.ranAt ? `Run started ${esc(tests.ranAt)}. ` : ""
        }Full Playwright report: <a href="pw-report/index.html">output/pw-report</a></p>`
