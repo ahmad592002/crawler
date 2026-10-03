@@ -15,7 +15,8 @@
     "export:burp": "tsx src/export-burp.ts",
     "predeploy": "tsx src/deploy-check.ts",
     "coverage": "tsx src/coverage.ts",
-    "authz": "tsx src/authz-check.ts"
+    "authz": "tsx src/authz-check.ts",
+    "preflight": "tsx src/preflight.ts"
   },
   "type": "module",
   "private": true,

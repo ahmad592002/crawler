@@ -121,16 +121,46 @@ test.describe("jQuery UI menu", () => {
    *
    * The readiness wait is kept, because the upgrade is still asynchronous, but a failure to
    * upgrade is now a failure of the page rather than an excuse to skip.
+   *
+   * On timeout it reports WHICH precondition failed. A bare waitForFunction cannot tell
+   * "jQuery UI never arrived" from "the widget did not initialise", and those are different
+   * problems: the first is the page failing to serve its own scripts - which is what happens
+   * when the target is overloaded, and it took a spread of twenty unrelated red tests before
+   * that was obvious - while the second is the defect this block exists to catch. A red
+   * suite has to be diagnosable from one line of output.
    */
-  const widgetReady = (page: Page): Promise<void> =>
-    page.waitForFunction(
-      () =>
-        typeof (window as unknown as { jQuery?: { fn?: { menu?: unknown } } }).jQuery?.fn
-          ?.menu === "function" &&
-        document.querySelector("#menu")?.classList.contains("ui-menu") === true,
-      undefined,
-      { timeout: 20_000 },
-    ) as unknown as Promise<void>;
+  const widgetReady = async (page: Page): Promise<void> => {
+    const upgraded = () =>
+      page.evaluate(() => {
+        const jq = (window as unknown as { jQuery?: { fn?: { menu?: unknown; jquery?: string } } })
+          .jQuery;
+        return {
+          jQuery: typeof jq !== "undefined",
+          jQueryUi: typeof jq?.fn?.menu === "function",
+          menuPresent: document.querySelector("#menu") !== null,
+          widget: document.querySelector("#menu")?.classList.contains("ui-menu") === true,
+        };
+      });
+
+    try {
+      await expect.poll(async () => (await upgraded()).widget, { timeout: 30_000 }).toBe(true);
+    } catch {
+      const s = await upgraded();
+      if (!s.jQuery || !s.jQueryUi) {
+        throw new Error(
+          `/jqueryui/menu did not serve its own scripts: jQuery ${s.jQuery ? "loaded" : "MISSING"}, ` +
+            `jQuery UI ${s.jQueryUi ? "loaded" : "MISSING"}. Both are same-origin on this page ` +
+            `(/js/vendor/...), so this is the target failing to respond, not a widget defect - ` +
+            `check whether the site is up and not being hammered by a parallel run.`,
+        );
+      }
+      throw new Error(
+        `jQuery UI loaded but #menu was never upgraded into a widget ` +
+          `(#menu ${s.menuPresent ? "exists" : "is MISSING"}, no ui-menu class). ` +
+          `That is a defect in the page's own initialisation.`,
+      );
+    }
+  };
 
   test("the menu is upgraded into a widget, with Disabled actually disabled", async ({ page }) => {
     // ui-state-disabled is SERVER-RENDERED in the static markup, so asserting it alone
