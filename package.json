@@ -18,7 +18,8 @@
     "authz": "tsx src/authz-check.ts",
     "preflight": "tsx src/preflight.ts",
     "test:fast": "playwright test tests/auth.spec.ts tests/forms.spec.ts tests/structure.spec.ts",
-    "profile": "tsx src/techprofile.ts"
+    "profile": "tsx src/techprofile.ts",
+    "configui": "tsx src/configpage.ts"
   },
   "type": "module",
   "private": true,
