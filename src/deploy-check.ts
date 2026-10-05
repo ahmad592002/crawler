@@ -18,7 +18,7 @@
 import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
-import type { PageRecord } from "./crawl.js";
+import { slugify as contentSlug, type PageRecord } from "./crawl.js";
 import { readHistory, type HttpExchange } from "./http-history.js";
 import { fingerprint, overlap, SAME_PAGE, looksLikeHtml, htmlIsWrongFor } from "./fingerprint.js";
 import { polite } from "./polite.js";
@@ -554,6 +554,15 @@ function readPages(): PageRecord[] {
 const MAX_CONTENT_FETCH = 150;
 
 /**
+ * The same slug the crawler writes its saved HTML under.
+ *
+ * Imported rather than re-implemented: two copies of a hashing slug that must agree is a
+ * silent cache miss waiting to happen - the scan would simply re-fetch everything and
+ * nobody would notice, because the only symptom is slowness.
+ */
+const slugifyForContent = contentSlug;
+
+/**
  * Page HTML for the content scan: whatever the capture holds, PLUS a direct fetch of every
  * crawled page the capture does not cover.
  *
@@ -607,8 +616,29 @@ async function collectHtml(
     missing.push(p.url);
   }
 
-  const targets = missing.slice(0, MAX_CONTENT_FETCH);
-  const overBound = missing.length - targets.length;
+  // Before fetching anything: the crawler saves each page's RENDERED DOM under output/
+  // content/, and that is both free and better input than the served bytes - a leftover
+  // injected by script is invisible on the wire. The scan used to re-fetch all 51
+  // reachable pages, so every run made two full passes over someone else's site to look at
+  // the same content.
+  let fromDisk = 0;
+  const stillMissing: string[] = [];
+  for (const url of missing) {
+    const file = resolve(OUT, "content", `${slugifyForContent(url)}.html`);
+    if (!existsSync(file)) {
+      stillMissing.push(url);
+      continue;
+    }
+    try {
+      html.set(url, readFileSync(file, "utf8"));
+      fromDisk++;
+    } catch {
+      stillMissing.push(url);
+    }
+  }
+
+  const targets = stillMissing.slice(0, MAX_CONTENT_FETCH);
+  const overBound = stillMissing.length - targets.length;
 
   let fetched = 0;
   let protectedPages = 0;
@@ -632,7 +662,9 @@ async function collectHtml(
   // Say what was actually examined. A count that does not add up is the signal that the
   // scan is narrower than the crawl, and it should be visible without reading the code.
   const unreachable = targets.length - fetched - protectedPages;
-  const parts = [`${fromCapture} from capture`, `${fetched} fetched`];
+  const parts = [`${fromCapture} from capture`];
+  if (fromDisk > 0) parts.push(`${fromDisk} reused from the crawl`);
+  parts.push(`${fetched} fetched`);
   if (protectedPages > 0) parts.push(`${protectedPages} protected (401/403)`);
   if (gone > 0) parts.push(`${gone} already 404/410 in the crawl`);
   if (unreachable > 0) parts.push(`${unreachable} unreachable`);

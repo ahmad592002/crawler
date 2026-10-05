@@ -16,7 +16,8 @@
     "predeploy": "tsx src/deploy-check.ts",
     "coverage": "tsx src/coverage.ts",
     "authz": "tsx src/authz-check.ts",
-    "preflight": "tsx src/preflight.ts"
+    "preflight": "tsx src/preflight.ts",
+    "test:fast": "playwright test tests/auth.spec.ts tests/forms.spec.ts tests/structure.spec.ts"
   },
   "type": "module",
   "private": true,

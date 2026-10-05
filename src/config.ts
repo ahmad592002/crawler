@@ -50,6 +50,20 @@ const ConfigSchema = z.object({
    * a hard ceiling for one run, counting browser navigations as well as fetches - a page
    * load costs the target the same either way.
    */
+  /**
+   * Save each crawled page's HTML so nothing has to fetch it twice.
+   *
+   * The crawler already holds the rendered DOM - it reads it for CAPTCHA detection - and
+   * the pre-deploy content scan was then fetching all 51 reachable pages AGAIN. Two full
+   * passes over someone else's site to look at the same bytes, which is both the slowest
+   * part of a run and the rudest.
+   *
+   * Saved content is the RENDERED DOM, which is strictly better input for the scan than
+   * the served HTML: a leftover injected by script is invisible in the bytes on the wire.
+   */
+  savePageHtml: z.boolean().default(true),
+  /** Per-page cap on saved HTML. A 500KB page is not 500KB of interesting leftovers. */
+  savePageHtmlMaxBytes: z.number().int().positive().default(300_000),
   requestDelayMs: z.number().int().nonnegative().default(250),
   maxRequests: z.number().int().nonnegative().default(2000),
   /** Consecutive 429/503 answers from one origin before the run stops touching it. */

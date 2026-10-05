@@ -19,6 +19,7 @@ import { politeClient } from "./polite.js";
 import { detectCaptcha, isBlocked, type CaptchaSignal } from "./captcha.js";
 
 const SHOTS = resolve(OUT, "screenshots");
+const CONTENT = resolve(OUT, "content");
 const STATE = resolve(OUT, "auth", "state.json");
 
 export interface FormField {
@@ -192,7 +193,7 @@ function inScope(url: string, cfg: QaConfig): boolean {
   return true;
 }
 
-function slugify(url: string): string {
+export function slugify(url: string): string {
   const s = url.replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
   // The hash is ALWAYS appended, not just for long URLs: collapsing every punctuation run
   // to "_" makes /a/b, /a-b and /a_b share a slug, so one screenshot would silently
@@ -457,10 +458,27 @@ async function visit(
   // Read from the live DOM rather than the served HTML: these widgets are injected by
   // script, so the markup that arrived over the wire often contains no trace of them.
   let captcha: CaptchaSignal[] = [];
+  let pageHtml: string | null = null;
   try {
-    captcha = detectCaptcha(await page.content());
+    pageHtml = await page.content();
+    captcha = detectCaptcha(pageHtml);
   } catch {
     /* a page that died before content() is already recorded as not ok */
+  }
+
+  // Save the rendered DOM so the content scan never re-fetches this page. Capped, and
+  // best-effort: a failed write must not fail a crawl.
+  const htmlToSave = pageHtml;
+  if (cfg.savePageHtml && htmlToSave && navOk) {
+    try {
+      mkdirSync(CONTENT, { recursive: true });
+      writeFileSync(
+        resolve(CONTENT, `${slugify(url)}.html`),
+        htmlToSave.slice(0, cfg.savePageHtmlMaxBytes),
+      );
+    } catch {
+      /* out of disk, or a path the filesystem refuses - not worth failing a crawl */
+    }
   }
   if (isBlocked(captcha)) {
     console.log(`  [captcha] ${url} is gated by ${captcha.map((c) => c.kind).join(", ")}`);
@@ -517,6 +535,7 @@ async function visit(
     },
     discovered,
   };
+
 }
 
 // ---------------------------------------------------------------- driver

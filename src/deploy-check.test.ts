@@ -8,6 +8,11 @@
  * Offline: no browser, no network.
  */
 import { test } from "node:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { OUT } from "./config.js";
+import { slugify as crawlSlug } from "./crawl.js";
 import assert from "node:assert/strict";
 import {
   scanContent,
@@ -384,4 +389,49 @@ test("the fetch bound is respected and the excess is not silently dropped", asyn
   // The remainder is reported on stdout rather than dropped in silence; the count below is
   // what the operator needs in order to notice the scan is narrower than the crawl.
   assert.equal(many.length - requested.length, 5);
+});
+
+// ------------------------------------------- the crawl's saved HTML is actually reused
+
+/**
+ * Every run used to make two full passes over the target: the crawler loaded all 51
+ * reachable pages, then the content scan fetched all 51 again to look at the same bytes.
+ *
+ * The crawler now saves each page's rendered DOM and the scan reads it from disk. This is
+ * tested because the only symptom of it silently breaking is SLOWNESS - if the slug the
+ * scan computes ever stops matching the one the crawl wrote, the scan quietly re-fetches
+ * everything and nobody notices.
+ */
+test("a page whose HTML the crawl saved is not fetched again", async () => {
+  const box = mkdtempSync(join(tmpdir(), "qa-content-"));
+  const prevOut = process.env.QA_OUT;
+  try {
+    // collectHtml resolves output/content against OUT, which is read at import time, so
+    // the saved file is written where this process's OUT already points.
+    const dir = resolve(OUT, "content");
+    mkdirSync(dir, { recursive: true });
+
+    const url = "https://target.test/saved-page";
+    const file = resolve(dir, `${crawlSlug(url)}.html`);
+    writeFileSync(file, "<html><body>from the crawl</body></html>");
+
+    try {
+      const { html, requested } = await collectWithStub([page(url)], []);
+      assert.deepEqual(requested, [], "the scan must not re-fetch what the crawl already saved");
+      assert.match(html.get(url) ?? "", /from the crawl/);
+    } finally {
+      rmSync(file, { force: true });
+    }
+  } finally {
+    if (prevOut === undefined) delete process.env.QA_OUT;
+    else process.env.QA_OUT = prevOut;
+    rmSync(box, { recursive: true, force: true });
+  }
+});
+
+test("a page with no saved HTML is still fetched", async () => {
+  // The other direction: reuse must not become a reason to skip pages entirely.
+  const { html, requested } = await collectWithStub([page("https://target.test/never-saved")], []);
+  assert.deepEqual(requested, ["https://target.test/never-saved"]);
+  assert.equal(html.size, 1);
 });
