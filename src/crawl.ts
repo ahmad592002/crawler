@@ -16,6 +16,7 @@ import { recordHistory, writeBurpXml, drainHistory, historyJsonl, historyXml } f
 import { acquireLock } from "./runlock.js";
 import { judgeCrawl } from "./crawl-verdict.js";
 import { politeClient } from "./polite.js";
+import { detectCaptcha, isBlocked, type CaptchaSignal } from "./captcha.js";
 
 const SHOTS = resolve(OUT, "screenshots");
 const STATE = resolve(OUT, "auth", "state.json");
@@ -63,6 +64,14 @@ export interface PageRecord {
    * coverage.ts treated the stub as a page in its own right.
    */
   redirected: boolean;
+  /**
+   * CAPTCHA challenges found on this page.
+   *
+   * Recorded so a gated flow is reported as GATED rather than broken. Without it, a
+   * signup behind a challenge looks like a form that silently fails - the agent submits,
+   * nothing happens, and the finding written is about the wrong thing entirely.
+   */
+  captcha: CaptchaSignal[];
   /** False when the navigation itself failed. A failed visit is NOT a crawled page. */
   ok: boolean;
   mode: "anon" | "auth";
@@ -445,6 +454,18 @@ async function visit(
     };
   });
 
+  // Read from the live DOM rather than the served HTML: these widgets are injected by
+  // script, so the markup that arrived over the wire often contains no trace of them.
+  let captcha: CaptchaSignal[] = [];
+  try {
+    captcha = detectCaptcha(await page.content());
+  } catch {
+    /* a page that died before content() is already recorded as not ok */
+  }
+  if (isBlocked(captcha)) {
+    console.log(`  [captcha] ${url} is gated by ${captcha.map((c) => c.kind).join(", ")}`);
+  }
+
   const normFinal = normalizeUrl(finalUrl) ?? finalUrl;
   const redirected = normFinal !== url;
   const authRequired =
@@ -489,6 +510,7 @@ async function visit(
       links: info.links,
       authRequired,
       redirected,
+      captcha,
       ok: navOk,
       mode,
       crawledAt: new Date().toISOString(),

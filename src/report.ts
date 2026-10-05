@@ -148,6 +148,9 @@ function normalizePage(p: Partial<PageRecord>): PageRecord {
     // Absent in records written before the field existed; false is the safe reading,
     // since it only ever widens what coverage treats as a real page.
     redirected: p.redirected === true,
+    // Coerced through a guard like every other array here: a hand-edited jsonl with a
+    // non-array captcha field would otherwise crash the report on .length.
+    captcha: Array.isArray(p.captcha) ? p.captcha : [],
     ok: p.ok ?? p.status !== null,
     mode: p.mode === "auth" ? "auth" : "anon",
     crawledAt: str(p.crawledAt),

@@ -22,6 +22,7 @@ import type { PageRecord } from "./crawl.js";
 import { readHistory, type HttpExchange } from "./http-history.js";
 import { fingerprint, overlap, SAME_PAGE, looksLikeHtml, htmlIsWrongFor } from "./fingerprint.js";
 import { polite } from "./polite.js";
+import { detectCaptcha, unprotectedSensitiveForm } from "./captcha.js";
 
 const FINDINGS = resolve(OUT, "deploy-findings.jsonl");
 
@@ -330,6 +331,37 @@ function scanContent(pages: PageRecord[], html: Map<string, string>): DeployFind
   for (const page of pages) {
     const body = html.get(page.url);
     if (!body) continue;
+
+    // Bot protection, or the lack of it. A sensitive form with no CAPTCHA anywhere on its
+    // page is a real defect this scan previously had no way to express: anyone can automate
+    // account creation, password resets or a contact form that sends mail. The check is
+    // deliberately narrow - a search box needs no CAPTCHA, and demanding one everywhere is
+    // how a check gets switched off.
+    const signals = detectCaptcha(body);
+    for (const form of page.forms) {
+      const identifiers = [form.action, ...form.fields.map((f) => f.name || "")];
+      const gap = unprotectedSensitiveForm(identifiers, signals);
+      if (!gap) continue;
+
+      const key = `${page.url}::unprotected::${gap.what}`;
+      if (reported.has(key)) continue;
+      reported.add(key);
+
+      found.push({
+        id: `D-C${String(++n).padStart(2, "0")}`,
+        url: page.url,
+        feature: `No bot protection on ${gap.what}`,
+        severity: "medium",
+        steps: [`GET ${page.url}`, `Submit the form matching "${gap.matched}" repeatedly`],
+        expected: "A CAPTCHA, a rate limit, or another bot check guards this form",
+        actual: `the page carries no recognised CAPTCHA widget, and the form matches "${gap.matched}"`,
+        evidence: `form action "${form.action || "(none)"}" with fields: ${form.fields
+          .map((f) => f.name || f.type)
+          .join(", ")
+          .slice(0, 120)}`,
+        source: "content",
+      });
+    }
 
     for (const pattern of CONTENT_PATTERNS) {
       const re = new RegExp(pattern.re.source, pattern.re.flags);
