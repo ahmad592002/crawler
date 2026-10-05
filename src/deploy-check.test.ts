@@ -18,6 +18,12 @@ import {
 } from "./deploy-check.js";
 import type { PageRecord } from "./crawl.js";
 import type { HttpExchange } from "./http-history.js";
+import {
+  createPoliteClient,
+  setPoliteClient,
+  resetPoliteClient,
+  DEFAULT_POLITE,
+} from "./polite.js";
 
 const page = (url: string): PageRecord =>
   ({
@@ -270,22 +276,35 @@ async function collectWithStub(
   }),
 ): Promise<{ html: Map<string, string>; requested: string[] }> {
   const requested: string[] = [];
-  const real = globalThis.fetch;
-  globalThis.fetch = (async (input: unknown) => {
-    const url = String(input);
-    requested.push(url);
-    const r = responder(url);
-    return {
-      ok: r.ok,
-      status: r.status ?? (r.ok ? 200 : 500),
-      text: async () => r.body,
-    } as unknown as Response;
-  }) as typeof globalThis.fetch;
+
+  // Install a politeness client whose fetch is the stub, rather than monkeypatching
+  // globalThis. Two reasons: requests now go through that client, and its spacing comes
+  // from the config - so driving 150 requests through the real one would genuinely wait
+  // 150 x 250ms. delayMs 0 keeps this suite offline AND instant while still exercising the
+  // same code path the crawler uses.
+  setPoliteClient(
+    createPoliteClient(
+      { ...DEFAULT_POLITE, delayMs: 0, budget: 0 },
+      {
+        fetchImpl: (async (input: unknown) => {
+          const url = String(input);
+          requested.push(url);
+          const r = responder(url);
+          return {
+            ok: r.ok,
+            status: r.status ?? (r.ok ? 200 : 500),
+            text: async () => r.body,
+          } as unknown as Response;
+        }) as unknown as typeof fetch,
+      },
+    ),
+  );
+
   try {
     const html = await collectHtml(pages, history, CFG, 5_000);
     return { html, requested };
   } finally {
-    globalThis.fetch = real;
+    resetPoliteClient();
   }
 }
 

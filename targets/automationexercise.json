@@ -18,7 +18,7 @@
   ],
   "maxPages": 60,
   "maxDepth": 6,
-  "concurrency": 2,
+  "concurrency": 1,
   "navTimeoutMs": 90000,
   "maxRuntimeMs": 1200000,
   "blockDomains": [
@@ -85,5 +85,9 @@
       "username": "tomsmith",
       "password": "SuperSecretPassword!"
     }
-  ]
+  ],
+  "requestDelayMs": 750,
+  "maxRequests": 600,
+  "rateLimitBreakAfter": 3,
+  "rateLimitRetries": 2
 }

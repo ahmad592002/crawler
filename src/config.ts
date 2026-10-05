@@ -37,6 +37,25 @@ const ConfigSchema = z.object({
   navTimeoutMs: z.number().int().positive(),
   /** Hard wall-clock cap on one crawl. Without it a single hung page stalls forever. */
   maxRuntimeMs: z.number().int().positive().default(30 * 60_000),
+  /**
+   * How hard this agent is allowed to lean on a target.
+   *
+   * There was nothing here, and the consequences were measured twice: four parallel
+   * crawls got the agent throttled off a demo site, and a suite degraded its own target
+   * until its largest asset took 26.8 seconds and twelve tests went flaky. Both times
+   * the throttling was reported as findings about the site.
+   *
+   * requestDelayMs is the minimum gap between two requests to the SAME origin, and it
+   * is the setting that prevents the problem rather than reacting to it. maxRequests is
+   * a hard ceiling for one run, counting browser navigations as well as fetches - a page
+   * load costs the target the same either way.
+   */
+  requestDelayMs: z.number().int().nonnegative().default(250),
+  maxRequests: z.number().int().nonnegative().default(2000),
+  /** Consecutive 429/503 answers from one origin before the run stops touching it. */
+  rateLimitBreakAfter: z.number().int().positive().default(5),
+  /** Retries after a rate-limit or gateway answer, before giving up on a URL. */
+  rateLimitRetries: z.number().int().nonnegative().default(3),
   blockDomains: z.array(z.string()),
   denyList: z.array(z.string()),
   /**

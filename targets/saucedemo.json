@@ -18,7 +18,7 @@
   ],
   "maxPages": 40,
   "maxDepth": 6,
-  "concurrency": 2,
+  "concurrency": 1,
   "navTimeoutMs": 90000,
   "maxRuntimeMs": 1200000,
   "blockDomains": [
@@ -91,5 +91,9 @@
     "passwordLabel": "Password",
     "submitLabel": "Login",
     "successUrl": "/inventory.html$"
-  }
+  },
+  "requestDelayMs": 750,
+  "maxRequests": 600,
+  "rateLimitBreakAfter": 3,
+  "rateLimitRetries": 2
 }

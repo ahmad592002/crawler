@@ -18,7 +18,7 @@
   ],
   "maxPages": 50,
   "maxDepth": 4,
-  "concurrency": 2,
+  "concurrency": 1,
   "navTimeoutMs": 90000,
   "maxRuntimeMs": 1200000,
   "blockDomains": [
@@ -98,5 +98,9 @@
       "username": "john",
       "password": "demo"
     }
-  ]
+  ],
+  "requestDelayMs": 750,
+  "maxRequests": 600,
+  "rateLimitBreakAfter": 3,
+  "rateLimitRetries": 2
 }

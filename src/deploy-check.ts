@@ -21,6 +21,7 @@ import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from 
 import type { PageRecord } from "./crawl.js";
 import { readHistory, type HttpExchange } from "./http-history.js";
 import { fingerprint, overlap, SAME_PAGE, looksLikeHtml, htmlIsWrongFor } from "./fingerprint.js";
+import { polite } from "./polite.js";
 
 const FINDINGS = resolve(OUT, "deploy-findings.jsonl");
 
@@ -121,7 +122,7 @@ async function catchAllBaseline(
     for (let attempt = 0; attempt < 3 && body === null; attempt++) {
       const url = `${base}/__qa_agent_definitely_not_here_${tag}_${Date.now().toString(36)}`;
       try {
-        const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+        const res = await polite().fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
         // A non-200 is a definite answer, not a flake: this origin does not answer 200 to
         // everything, so the guard is genuinely not needed. Stop and say so.
         if (res.status !== 200) return null;
@@ -169,7 +170,7 @@ async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFindin
     if (isDeniedUrl(url, cfg)) continue;
 
     try {
-      const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      const res = await polite().fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
       if (res.status !== 200) continue;
 
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
@@ -581,7 +582,7 @@ async function collectHtml(
   let protectedPages = 0;
   for (const url of targets) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      const res = await polite().fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
       if (res.ok) {
         html.set(url, (await res.text()).slice(0, 500_000));
         fetched++;

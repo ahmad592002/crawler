@@ -15,6 +15,7 @@ import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig, O
 import { recordHistory, writeBurpXml, drainHistory, historyJsonl, historyXml } from "./http-history.js";
 import { acquireLock } from "./runlock.js";
 import { judgeCrawl } from "./crawl-verdict.js";
+import { politeClient } from "./polite.js";
 
 const SHOTS = resolve(OUT, "screenshots");
 const STATE = resolve(OUT, "auth", "state.json");
@@ -220,7 +221,7 @@ async function sitemapSeeds(base: string, cfg: QaConfig): Promise<string[]> {
   const candidates = [`${base}/sitemap.xml`];
 
   try {
-    const res = await fetch(`${base}/robots.txt`, { signal: AbortSignal.timeout(8000) });
+    const res = await politeClient(cfg).fetch(`${base}/robots.txt`, { signal: AbortSignal.timeout(8000) });
     if (res.ok) {
       const text = await res.text();
       for (const line of text.split(/\r?\n/)) {
@@ -234,7 +235,7 @@ async function sitemapSeeds(base: string, cfg: QaConfig): Promise<string[]> {
 
   for (const sitemap of candidates) {
     try {
-      const res = await fetch(sitemap, { signal: AbortSignal.timeout(8000) });
+      const res = await politeClient(cfg).fetch(sitemap, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) continue;
       const xml = await res.text();
       const locRe = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
@@ -381,6 +382,9 @@ async function visit(
   let finalUrl = url;
 
   try {
+    // Wait for this origin's turn before navigating. Without it, `concurrency` workers
+    // all load pages as fast as the browser allows and a small target simply folds.
+    await politeClient(cfg).gate(url);
     const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: cfg.navTimeoutMs });
     status = res?.status() ?? null;
     // Bounded quiet period - never an unbounded networkidle, which can hang forever.
@@ -779,7 +783,30 @@ async function main(): Promise<void> {
   // from it. A one-page crawl of a login-gated app used to report "pages crawled: 1"
   // and nothing else, and coverage then produced a figure from that single page.
   const verdict = judgeCrawl(records, mode);
-  writeFileSync(resolve(OUT, `crawl-status.${mode}.json`), `${JSON.stringify(verdict, null, 2)}\n`);
+
+  // What this run cost the target, and whether the target asked us to stop. A crawl that
+  // was throttled produces pages that "failed" and assets that "broke", and every one of
+  // those is the throttling rather than the site - so it is recorded next to the verdict
+  // and stated loudly, not left for someone to infer from a pile of odd failures.
+  const load = politeClient(cfg).stats();
+  console.log(
+    `requests:      ${load.sent}` +
+      (load.retried ? `, ${load.retried} retried` : "") +
+      (load.rateLimited ? `, ${load.rateLimited} rate-limited` : "") +
+      (load.waitedMs ? `, ${(load.waitedMs / 1000).toFixed(1)}s spent waiting politely` : ""),
+  );
+
+  const status = { ...verdict, load };
+  writeFileSync(resolve(OUT, `crawl-status.${mode}.json`), `${JSON.stringify(status, null, 2)}\n`);
+
+  if (load.throttledOrigins.length > 0) {
+    console.log(`\n${"!".repeat(60)}`);
+    console.log(`THE TARGET RATE-LIMITED THIS RUN: ${load.throttledOrigins.join(", ")}`);
+    console.log(
+      `  Nothing below is trustworthy. Raise requestDelayMs, lower concurrency, and re-run.`,
+    );
+    console.log(`${"!".repeat(60)}`);
+  }
   if (verdict.verdict !== "ok") {
     console.log(`\n${"!".repeat(60)}`);
     console.log(`THIS CRAWL PROVED LITTLE: ${verdict.verdict}`);

@@ -16,6 +16,7 @@
  * is not there.
  */
 import { loadConfig, isAllowedUrl, type QaConfig } from "./config.js";
+import { polite } from "./polite.js";
 
 interface Probe {
   url: string;
@@ -46,7 +47,7 @@ export function subresources(html: string, base: string, limit = 10): string[] {
 async function probe(url: string, timeoutMs: number): Promise<Probe> {
   const started = Date.now();
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const res = await polite().fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     // Drain the body: a server can answer with headers and then stall, which is exactly
     // the shape that makes a browser hang while a HEAD-only check looks healthy.
     await res.text();
@@ -112,7 +113,7 @@ export async function checkHealth(cfg: QaConfig): Promise<Health> {
 
   let assets: string[] = [];
   try {
-    const res = await fetch(base, { signal: AbortSignal.timeout(timeoutMs) });
+    const res = await polite().fetch(base, { signal: AbortSignal.timeout(timeoutMs) });
     assets = subresources(await res.text(), base).filter((u) => isAllowedUrl(u, cfg));
   } catch {
     /* already proved the document is reachable; carry on with none */
