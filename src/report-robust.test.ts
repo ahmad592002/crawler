@@ -274,3 +274,48 @@ test("a genuine failure still outranks flakiness", () => {
   );
   assert.match(html, /sev critical">fail/, "a failing test is a failure first");
 });
+
+// ------------------------------------------------------- the site analysis section
+
+test("a tech profile renders as chips, confirmed solid and guesses dashed", () => {
+  const html = renderWith({
+    "pages.jsonl": MINIMAL_PAGE + "\n",
+    "techprofile.json": JSON.stringify({
+      url: "https://t.test/",
+      server: [{ name: "nginx 1.25", confidence: "confirmed", evidence: "server: nginx/1.25" }],
+      frameworks: [{ name: "React", confidence: "likely", evidence: "data-reactroot" }],
+      cdn: [], cms: [], analytics: [], languages: [],
+      securityHeaders: [{ name: "content-security-policy", present: false }],
+      cookies: [{ name: "sid", secure: true, httpOnly: true, sameSite: "Lax" }],
+      notableHeaders: [{ name: "server", value: "nginx/1.25" }],
+    }),
+  });
+  assert.match(html, /Site analysis/);
+  assert.match(html, /nginx 1.25/);
+  assert.match(html, /pill likely[^>]*>React/, "a markup guess must be marked likely");
+  assert.match(html, /hdr miss">[^<]*content-security-policy/, "a missing header shows as missing");
+  assert.match(html, /sid/);
+});
+
+test("no tech profile means no site-analysis section, not a broken one", () => {
+  const html = renderWith({ "pages.jsonl": MINIMAL_PAGE + "\n" });
+  assert.doesNotMatch(html, /Site analysis/);
+});
+
+test("a corrupt techprofile.json does not take the report down", () => {
+  const html = renderWith({ "pages.jsonl": MINIMAL_PAGE + "\n", "techprofile.json": "{ not json" });
+  assert.match(html, /QA report/, "the rest of the report still renders");
+  assert.doesNotMatch(html, /Site analysis/);
+});
+
+test("markup in a detected name is escaped, not rendered", () => {
+  const html = renderWith({
+    "pages.jsonl": MINIMAL_PAGE + "\n",
+    "techprofile.json": JSON.stringify({
+      url: "https://t.test/", server: [{ name: "<img src=x onerror=alert(1)>", confidence: "confirmed", evidence: "x" }],
+      frameworks: [], cdn: [], cms: [], analytics: [], languages: [], securityHeaders: [], cookies: [], notableHeaders: [],
+    }),
+  });
+  assert.doesNotMatch(html, /<img src=x onerror/);
+  assert.match(html, /&lt;img src=x/);
+});

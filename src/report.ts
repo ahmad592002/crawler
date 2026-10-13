@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync, statSync, readdirSync } from "
 import { resolve, sep } from "node:path";
 import { ROOT, loadConfig, OUT as CONFIG_OUT } from "./config.js";
 import type { PageRecord } from "./crawl.js";
+import type { TechProfile } from "./techprofile.js";
 
 const DEFAULT_OUT = CONFIG_OUT;
 
@@ -365,6 +366,7 @@ export function buildReport(outDir: string = DEFAULT_OUT): string {
   // because a missing authorization verdict used to be indistinguishable from a clean one.
   const authz = readJson<AuthzStatus>("authz-status.json");
   const coverage = readJson<CoverageSummary>("coverage.json");
+  const tech = readJson<TechProfile>("techprofile.json");
 
   const bySeverity = SEVERITY_ORDER.map((sev) => ({
     sev,
@@ -460,6 +462,56 @@ export function buildReport(outDir: string = DEFAULT_OUT): string {
     )
     .join("");
 
+  // Site analysis: the technology profile, rendered as chips. A confirmed signal (from a
+  // header) is a solid pill; a markup guess is dashed, so the two are never conflated.
+  const pill = (d: { name: string; confidence: string; evidence: string }): string =>
+    `<span class="pill ${d.confidence === "likely" ? "likely" : ""}" title="${esc(d.evidence)}">${esc(
+      d.name,
+    )}${d.confidence === "likely" ? " <small>likely</small>" : ""}</span>`;
+  const techCard = (title: string, items: TechProfile["server"]): string =>
+    items.length
+      ? `<div class="techcard"><h3>${esc(title)}</h3><div class="pills">${items.map(pill).join("")}</div></div>`
+      : "";
+  const siteAnalysis = tech
+    ? `<h2>Site analysis</h2>
+<div class="techgrid">
+  ${techCard("Server", tech.server)}
+  ${techCard("Framework", tech.frameworks)}
+  ${techCard("CDN / host", tech.cdn)}
+  ${techCard("CMS", tech.cms)}
+  ${techCard("Language", tech.languages)}
+  ${techCard("Analytics", tech.analytics)}
+  <div class="techcard"><h3>Security headers</h3><div class="hdrs">${(tech.securityHeaders ?? [])
+    .map(
+      (h) =>
+        `<span class="hdr ${h.present ? "ok" : "miss"}">${h.present ? "✓" : "✗"} ${esc(
+          h.name,
+        )}</span>`,
+    )
+    .join("")}</div></div>
+  ${
+    (tech.cookies ?? []).length
+      ? `<div class="techcard"><h3>Cookies set</h3>${tech.cookies
+          .map(
+            (c) =>
+              `<div class="kv"><b>${esc(c.name)}</b> &middot; ${c.secure ? "Secure" : "not Secure"}, ${
+                c.httpOnly ? "HttpOnly" : "not HttpOnly"
+              }, SameSite=${esc(c.sameSite ?? "none")}</div>`,
+          )
+          .join("")}</div>`
+      : ""
+  }
+  ${
+    (tech.notableHeaders ?? []).length
+      ? `<div class="techcard"><h3>Headers</h3>${tech.notableHeaders
+          .map((h) => `<div class="kv"><b>${esc(h.name)}</b>: ${esc(h.value)}</div>`)
+          .join("")}</div>`
+      : ""
+  }
+</div>
+`
+    : "";
+
   const specRows = tests.specs
     .map((s) => {
       // Three states, not two. A flaky test passed on a retry, so `ok` is true and it used
@@ -518,6 +570,19 @@ figcaption .t{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellip
 .badge{font-size:11px;padding:1px 6px;border-radius:5px;background:#8881;border:1px solid var(--line)}
 .badge.ok{color:var(--ok)} .badge.warn{color:var(--warn)} .badge.bad{color:var(--bad)}
 .badge.auth{color:var(--accent)}
+.techgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.techcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.techcard h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.pills{display:flex;flex-wrap:wrap;gap:6px}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;
+border:1px solid var(--line);border-radius:999px;padding:3px 10px;background:#8881}
+.pill small{font-weight:400;color:var(--muted)}
+.pill.likely{border-style:dashed}
+.hdrs{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.hdr{font-size:11.5px;border-radius:5px;padding:2px 8px;border:1px solid var(--line)}
+.hdr.ok{color:var(--ok)} .hdr.miss{color:var(--bad)}
+.kv{font-size:12px;color:var(--muted);margin:2px 0}
+.kv b{color:var(--ink);font-weight:600}
 .empty{background:var(--panel);border:1px dashed var(--line);border-radius:10px;
 padding:20px;color:var(--muted)}
 </style></head><body><div class="wrap">
@@ -536,6 +601,7 @@ padding:20px;color:var(--muted)}
   ${stat("tests passed", tests.total ? `${tests.passed}/${tests.total}` : "-", tests.failed ? "bad" : "ok")}
 </div>
 
+${siteAnalysis}
 <h2>Findings</h2>
 ${
   findings.length
