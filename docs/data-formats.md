@@ -93,6 +93,8 @@ Written by Claude during Phase 5. Read by `src/report.ts` and by the exit gate i
 | `actual` | string | no | |
 | `evidence` | string | no | A URL becomes a link; free text renders as text. |
 | `details` / `notes` | string | no | |
+| `area` | string | no | What kind of testing found it: `functional`, `forms`, `security`, `authz`, `accessibility`, `visual`, `performance`, `content`, `harness`. See [agents.md](agents.md). |
+| `agent` | string | no | The `.claude/agents` agent that wrote it. |
 
 ```json
 {"id":"F-001","severity":"critical","url":"https://site/forgot_password",

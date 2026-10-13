@@ -86,6 +86,7 @@ correctly — the day someone fixes it. Nothing to remember to re-enable.
 | Page | Read it when |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | You want to know what runs, in what order, and why |
+| [docs/agents.md](docs/agents.md) | Running the Claude agent team (`/qa-team`), one agent per step |
 | [docs/configuration.md](docs/configuration.md) | Pointing at a new site, or a knob isn't behaving |
 | [docs/safety.md](docs/safety.md) | **Before running against anything you care about** |
 | [docs/data-formats.md](docs/data-formats.md) | Reading `output/*.jsonl` or writing a consumer |
