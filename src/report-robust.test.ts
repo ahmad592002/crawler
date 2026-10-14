@@ -319,3 +319,60 @@ test("markup in a detected name is escaped, not rendered", () => {
   assert.doesNotMatch(html, /<img src=x onerror/);
   assert.match(html, /&lt;img src=x/);
 });
+
+// ------------------------------------------------------- C-25: report injection defences
+//
+// safety.md promised these were regression-tested; nothing exercised either function. Both
+// are driven through the rendered report, which is where a hostile value actually lands.
+
+test("a hostile finding URL or evidence link never becomes a live href", () => {
+  const findings = [
+    { id: "F-1", url: "javascript:alert(1)", severity: "high", feature: "a" },
+    { id: "F-2", url: "//evil.test/x", severity: "high", feature: "b", evidence: "data:text/html,<b>x</b>" },
+    { id: "F-3", url: "JaVaScRiPt:alert(2)", severity: "low", feature: "c", evidence: "java\u0009script:alert(3)" },
+    { id: "F-4", url: "https://t.test/ok", severity: "low", feature: "d", evidence: "screenshots/ok.png" },
+  ]
+    .map((f) => JSON.stringify(f))
+    .join("\n");
+  const html = renderWith({ "pages.jsonl": `${MINIMAL_PAGE}\n`, "findings.jsonl": `${findings}\n` });
+
+  for (const bad of [/href="\s*javascript:/i, /href="data:/i, /href="\/\/evil/i, /href="java\s*script/i]) {
+    assert.doesNotMatch(html, bad);
+  }
+  assert.match(html, /href="https:\/\/t\.test\/ok"/, "a safe https link is still a link");
+  assert.match(html, /href="screenshots\/ok\.png"/, "a relative evidence path is still a link");
+});
+
+test("a screenshot path cannot embed a file from outside output/screenshots", () => {
+  const MARK = "LEAK-MARKER-c25";
+  const b64 = Buffer.from(MARK).toString("base64");
+  const elsewhere = mkdtempSync(join(tmpdir(), "qa-outside-"));
+  const outsideAbs = join(elsewhere, "secret.png");
+  writeFileSync(outsideAbs, MARK);
+
+  const page = (screenshot: string, n: number): string =>
+    JSON.stringify({ ...JSON.parse(MINIMAL_PAGE), url: `https://t.test/p${n}`, template: `https://t.test/p${n}`, screenshot });
+
+  try {
+    const html = renderWith({
+      // An image extension, inside the output dir but NOT inside screenshots/.
+      "leak.png": MARK,
+      ".env": MARK,
+      "screenshots/notes.txt": MARK, // inside screenshots/, but not an image
+      "screenshots/ok.png": "PNG-OK",
+      "pages.jsonl": [
+        page("../.env", 1),
+        page(".env", 2),
+        page("leak.png", 3),
+        page("screenshots/../leak.png", 4),
+        page(outsideAbs, 5),
+        page("screenshots/notes.txt", 6),
+        page("screenshots/ok.png", 7),
+      ].join("\n"),
+    });
+    assert.ok(!html.includes(b64), "a file outside screenshots/ (or a non-image) was base64'd into the report");
+    assert.ok(html.includes(Buffer.from("PNG-OK").toString("base64")), "a real screenshot is still embedded");
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});

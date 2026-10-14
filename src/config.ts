@@ -144,6 +144,7 @@ const ConfigSchema = z.object({
        */
       successText: z.string().optional(),
     })
+    .strict()
     .optional(),
 
   personas: z
@@ -157,7 +158,7 @@ const ConfigSchema = z.object({
         password: z.string().optional(),
         /** Fixed site username, for targets that log in by username rather than email. */
         username: z.string().optional(),
-      }),
+      }).strict(),
     )
     .optional(),
 });
@@ -165,7 +166,9 @@ const ConfigSchema = z.object({
 export type QaConfig = z.infer<typeof ConfigSchema>;
 
 export function loadConfig(path = CONFIG_PATH): QaConfig {
-  return ConfigSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  // Strict: an unknown key is an error, not silently dropped. A stripping schema let
+  // `requestDelayMS` parse cleanly and the run go out at the default spacing.
+  return ConfigSchema.strict().parse(JSON.parse(readFileSync(path, "utf8")));
 }
 
 /** True if the URL's origin is in allowedOrigins. All navigation must pass this. */
@@ -273,9 +276,18 @@ const DESTRUCTIVE_ROUTE =
  * spaces so the path reads as words and the same word-boundary rules apply.
  */
 export function isDeniedUrl(url: string, cfg: QaConfig): boolean {
+  // Exceptions are PATH regexes. Matched against the whole URL, '/add_remove_elements/?$'
+  // also matched '/account/delete?next=/add_remove_elements/' and exempted the delete.
+  // The placeholder base lets a relative href be cut down to its path the same way.
+  let exceptionPath = url;
+  try {
+    exceptionPath = new URL(url, "http://relative.invalid").pathname;
+  } catch {
+    // Unparseable; match the raw string, which is no looser than before.
+  }
   for (const pattern of cfg.denyUrlExceptions ?? []) {
     try {
-      if (new RegExp(pattern).test(url)) return false;
+      if (new RegExp(pattern).test(exceptionPath)) return false;
     } catch {
       // A bad regex in config must not silently disable the guard for everything else.
     }

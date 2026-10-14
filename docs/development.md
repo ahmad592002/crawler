@@ -95,6 +95,11 @@ await submitAndWait(page, safeClick(page, /Retrieve password/i), "/forgot_passwo
 `safeClick` refuses an ambiguous locator rather than guessing, so if two buttons match you
 will get a clear error telling you to narrow it.
 
+`src/lint-specs.test.ts` enforces both rules. A bare `page.goto("/literal-path")` is
+tolerated, because it cannot leave the origin and a reviewer can see where it goes. A
+`goto` on anything computed (a link from an email, a URL read off another page) fails the
+lint: use `safeGoto`, or `safeGotoResponse` when you need the status code.
+
 ### Known-bug tests
 
 Phase 6 writes a test for every finding that asserts the **correct** behaviour and marks

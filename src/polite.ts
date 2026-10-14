@@ -111,6 +111,11 @@ export interface PoliteClient {
   fetch(url: string, init?: RequestInit): Promise<Response>;
   /** Wait for this origin's turn without making a request - for browser navigations. */
   gate(url: string): Promise<void>;
+  /**
+   * Tell the limiter how a gated request was answered. Same strike, breaker and backoff
+   * bookkeeping as fetch(), but no retry and no sleep: the next gate() does the waiting.
+   */
+  report(url: string, status: number, retryAfter?: string | null): void;
   stats(): PoliteStats;
   /** True once any origin has been throttled badly enough to invalidate results. */
   throttled(): boolean;
@@ -179,16 +184,41 @@ export function createPoliteClient(cfg: PoliteConfig, deps: Deps = {}): PoliteCl
     }
   }
 
-  async function backoff(origin: string, attempt: number, header: string | null): Promise<void> {
+  function backoffMs(attempt: number, header: string | null): number {
     const asked = retryAfterMs(header, now());
     // Exponential with full jitter: 1s, 2s, 4s... jittered, so several workers backing off
     // together do not all return at the same instant and re-throttle the origin.
     const own = Math.min(cfg.maxBackoffMs, 1000 * 2 ** attempt);
-    const wait = Math.min(cfg.maxBackoffMs, asked ?? Math.round(own * (0.5 + random() * 0.5)));
+    return Math.min(cfg.maxBackoffMs, asked ?? Math.round(own * (0.5 + random() * 0.5)));
+  }
+
+  async function backoff(origin: string, attempt: number, header: string | null): Promise<void> {
+    const wait = backoffMs(attempt, header);
     stats.waitedMs += wait;
     // Hold the whole origin back, not just this request: a 429 is about the origin.
     nextFree.set(origin, now() + wait);
     await sleep(wait);
+  }
+
+  /**
+   * Count one answer against the origin's strike run. Returns the strike count after this
+   * answer (0 for a success), and opens the breaker once it reaches breakAfter.
+   */
+  function strike(origin: string, status: number): number {
+    if (!isTransient(status)) {
+      strikes.set(origin, 0);
+      return 0;
+    }
+    const prior = strikes.get(origin) ?? 0;
+    if (!isRateLimit(status)) return prior;
+    stats.rateLimited++;
+    const n = prior + 1;
+    strikes.set(origin, n);
+    if (n >= cfg.breakAfter) {
+      broken.add(origin);
+      if (!stats.throttledOrigins.includes(origin)) stats.throttledOrigins.push(origin);
+    }
+    return n;
   }
 
   return {
@@ -203,22 +233,8 @@ export function createPoliteClient(cfg: PoliteConfig, deps: Deps = {}): PoliteCl
         stats.sent++;
         const res = await doFetch(url, init);
 
-        if (!isTransient(res.status)) {
-          strikes.set(origin, 0);
-          return res;
-        }
-
-        if (isRateLimit(res.status)) {
-          stats.rateLimited++;
-          const n = (strikes.get(origin) ?? 0) + 1;
-          strikes.set(origin, n);
-          if (n >= cfg.breakAfter) {
-            broken.add(origin);
-            if (!stats.throttledOrigins.includes(origin)) stats.throttledOrigins.push(origin);
-            return res;
-          }
-        }
-
+        strike(origin, res.status);
+        if (!isTransient(res.status) || broken.has(origin)) return res;
         if (attempt >= cfg.maxRetries) return res;
 
         stats.retried++;
@@ -233,6 +249,16 @@ export function createPoliteClient(cfg: PoliteConfig, deps: Deps = {}): PoliteCl
       // Counted: a browser navigation costs the target exactly as much as a fetch, and a
       // budget that ignored them would be describing a fraction of the real load.
       stats.sent++;
+    },
+
+    report(url, status, retryAfter = null) {
+      const origin = originOf(url);
+      const n = strike(origin, status);
+      if (!isTransient(status)) return;
+      // Push the origin's next slot out rather than sleeping here: the caller has already
+      // got its answer, and it is the NEXT navigation that must wait. Never pull it in.
+      const until = now() + backoffMs(Math.max(0, n - 1), retryAfter);
+      if (until > (nextFree.get(origin) ?? 0)) nextFree.set(origin, until);
     },
 
     stats() {

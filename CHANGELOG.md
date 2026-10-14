@@ -6,6 +6,55 @@ An adversarial review of the whole codebase. Each item below is a defect that wa
 **demonstrated by running code**, not a theoretical concern, and each has a regression
 test in `src/guards.test.ts` (17 tests, offline, wired into CI as `npm run test:unit`).
 
+### Fixed — improvement round 1
+
+- **Crawl seeds bypassed the deny-list.** Only harvested links were deny-checked; baseUrl,
+  the saved auth landing and every sitemap `<loc>` went straight into the queue, so a
+  sitemap listing `/account/delete` was GET-ted. The check now sits in the queue itself
+  (`createFrontier().enqueue`), and refused seeds are listed in the crawl summary.
+
+- **The authorization scan bypassed the politeness limiter.** Its probes went out through
+  a raw request context with no spacing, budget or breaker. `probe()` now waits on the
+  shared client, and a refusal (breaker open, budget spent) stops the scan with an
+  `inconclusive` verdict instead of comparing throttled bodies.
+
+- **Crawler navigations never fed 429/503 back to the limiter.** They were spaced by
+  `gate()` but nobody looked at the answer, so the breaker and backoff could not trip
+  during a crawl. New `PoliteClient.report(url, status, retryAfter)` applies the same
+  strike/breaker/backoff bookkeeping as `fetch()` without retrying; the crawler and the
+  authorization probe both call it.
+
+- **A `denyUrlExceptions` entry could exempt any route through its query string.**
+  Exceptions were tested against the whole URL, so the shipped `/add_remove_elements/?$`
+  exempted `/account/delete?next=/add_remove_elements/`. They now match the path only.
+
+- **Links kept only one accessible name.** `<a aria-label="Details">Delete</a>` was judged
+  on "Details" and followed. Links now carry both names, as buttons already did, and are
+  withheld if either matches the deny-list.
+
+- **The pre-deploy content scan re-fetched destructive URLs and followed redirects.** It
+  checked only the origin, so a recorded `/account/delete` was requested again, and a page
+  that 302s to `/logout` was followed. It now skips `isDeniedUrl` matches and fetches with
+  `redirect: "manual"`; a 3xx is counted as "not followed", not scanned.
+
+- **Email-supplied links were followed with a bare `page.goto`.** `personas.setup.ts` and
+  `two-user.spec.ts` navigated to verification/invite links and other computed URLs past
+  the guard. They now use `safeGoto`/`safeGotoResponse`. The persona setup's hand-built
+  page gets the fixture's off-origin routing (`harden()`, now exported), and
+  `lint-specs.test.ts` fails on any `goto` whose target is not a literal relative path.
+
+- **Nested deny envelopes were read as data.** `isDenyEnvelope` counted any populated
+  nested value as returned data, so `{"error":{"message":"Unauthenticated"}}` and
+  JSON:API `{"errors":[{"title":"Unauthorized"}]}` were treated as the resource, which can
+  fabricate IDOR findings. `error`/`errors` keys are now read as the envelope, and their
+  string leaves are checked for denial wording.
+
+- **A typo'd config key was silently ignored.** The schema stripped unknown keys, so
+  `requestDelayMS` parsed cleanly and the run used the default spacing.
+  `loadConfig` is now strict at the top level and in `login` and `personas[]`, which makes
+  `docs/configuration.md`'s "an unknown key fails the run" true. Every shipped config
+  (`qa.config.json`, `targets/*.json`) still loads.
+
 ### Fixed — safety
 
 - **The deny-list was never applied to links.** `<a href="/users/7/delete">Delete</a>` is

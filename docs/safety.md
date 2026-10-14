@@ -62,7 +62,7 @@ Four places, not one. The single-point version is what let destructive links thr
 | Point | File | Effect |
 |---|---|---|
 | **Buttons** | `crawl.ts` | Split out of `buttons` into `deniedButtons`. Phase 5 plans clicks from `buttons`, so a denied label is never a candidate in the first place. |
-| **Links** | `crawl.ts` | Checked by anchor text **and** URL before queueing. Recorded in `deniedLinks` and never fetched. |
+| **Links** | `crawl.ts` | Checked by both accessible names (`aria-label` and visible text) **and** URL before queueing. Recorded in `deniedLinks` and never fetched. The queue itself also refuses any `isDeniedUrl` match, so seeds (baseUrl, auth landing, sitemap `<loc>`) are covered too. |
 | **Forms** | `crawl.ts` | `destructive: true` derived from the action URL and every submit label. |
 | **Clicks and navigation** | `tests/fixtures.ts` | `safeClick`, `safeClickLink`, `safeGoto` throw. |
 
@@ -188,7 +188,7 @@ advance. `isDeniedUrl` catches the obvious names; it cannot catch `/api/v2/items
    `"screenshot": "../.env"` caused the report to base64 your `.env` into
    `report.html` — which CI then uploaded as an artifact.
 
-All three are regression-tested in `src/guards.test.ts`.
+All three are regression-tested in `src/report-robust.test.ts`, through the rendered report: `esc()` by the "markup ... is escaped" cases, `safeHref()` and `thumb()` by the two "C-25" cases.
 
 ## Reporting a problem
 

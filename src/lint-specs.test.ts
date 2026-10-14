@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { resolve } from "node:path";
-import { ROOT } from "./config.js";
+import { ROOT, loadConfig } from "./config.js";
 import { stripComments } from "./coverage.js";
 
 const TESTS = resolve(ROOT, "tests");
@@ -308,4 +308,78 @@ test("the exemptions still hold when nothing else is on the line", () => {
   ]) {
     assert.equal(isUnguardedClick(line), false, `false positive: ${line}`);
   }
+});
+
+// =============================================================== improve round 1 (C-06)
+
+/**
+ * A navigation that skips safeGoto.
+ *
+ * A literal relative path ("/login") is allowed: it cannot leave the origin, and a reviewer
+ * sees exactly where it goes. Anything COMPUTED is not - a link pulled out of an email, or a
+ * URL read back off another page, is precisely the input safeGoto's scope and deny checks
+ * exist for, and personas.setup.ts was following verification links with a bare goto.
+ */
+const BARE_GOTO = /\.goto\s*\(\s*(?!["']\/[^"'`$]*["']\s*[,)])|\[\s*["'`]goto["'`]\s*\]/;
+
+function isBareGoto(line: string): boolean {
+  return BARE_GOTO.test(line);
+}
+
+test("no spec navigates to a computed URL with a bare goto", () => {
+  const offenders: string[] = [];
+  for (const file of specFiles) {
+    const src = codeOnly(readFileSync(file, "utf8"));
+    src.split("\n").forEach((line, i) => {
+      if (isBareGoto(line)) {
+        offenders.push(`${file.replace(ROOT, "").replace(/^[\/]/, "")}:${i + 1}  ${line.trim()}`);
+      }
+    });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `bare goto on a computed URL - use safeGoto / safeGotoResponse:\n  ${offenders.join("\n  ")}`,
+  );
+});
+
+test("the goto rule flags computed targets and allows literal relative paths", () => {
+  for (const line of [
+    `await page.goto(link, { waitUntil: "domcontentloaded" });`,
+    `await userB.page.goto(link!);`,
+    "await page.goto(`/users/${id}/delete`);",
+    `await page.goto("https://evil.test/");`,
+    `const res = await stranger.page.goto(url);`,
+    `await page["goto"]("/login");`,
+  ]) {
+    assert.equal(isBareGoto(line), true, `should be flagged: ${line}`);
+  }
+  for (const line of [
+    `await page.goto("/login");`,
+    `const res = await page.goto("/status_codes/404", { waitUntil: "commit" });`,
+    `await Promise.all([userA.page.goto("/secure"), userB.page.goto("/secure")]);`,
+    `await safeGoto(page, link);`,
+    `const res = await safeGotoResponse(userB.page, url);`,
+  ]) {
+    assert.equal(isBareGoto(line), false, `false positive: ${line}`);
+  }
+});
+
+test("safeGoto refuses an off-origin or destructive link before navigating", async () => {
+  // What the migrated call sites now rely on: an emailed link is checked, not followed.
+  const { safeGoto } = await import("../tests/fixtures.js");
+  const visited: string[] = [];
+  const fakePage = {
+    goto: async (url: string) => {
+      visited.push(url);
+      return null;
+    },
+  } as unknown as Parameters<typeof safeGoto>[0];
+
+  await assert.rejects(() => safeGoto(fakePage, "https://evil.test/verify?t=1"), /outside allowedOrigins/);
+  await assert.rejects(() => safeGoto(fakePage, "/account/7/delete"), /denyList/);
+  assert.deepEqual(visited, [], "a refused link must not be navigated at all");
+
+  await safeGoto(fakePage, "/login");
+  assert.deepEqual(visited, [new URL("/login", loadConfig().baseUrl).toString()]);
 });

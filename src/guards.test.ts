@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isDenied, isDeniedUrl, isAllowedUrl, type QaConfig } from "./config.js";
-import { normalizeUrl, dedupKey, templateOf } from "./crawl.js";
+import { normalizeUrl, dedupKey, templateOf, createFrontier, partitionLinks } from "./crawl.js";
 import { toBurpXml, type HttpExchange } from "./http-history.js";
 import { extractCode, extractLinks } from "./email/lib.js";
 
@@ -68,6 +68,44 @@ test("destructive URLs are denied, not just destructive button labels", () => {
   for (const url of ["https://target.test/payments", "https://target.test/deleted-items-report"]) {
     assert.equal(isDeniedUrl(url, cfg), false, `should be allowed: ${url}`);
   }
+});
+
+// C-01: only harvested links were deny-checked. Seeds - baseUrl, the saved auth landing and
+// every sitemap <loc> - went straight into the queue, so a sitemap listing /account/delete
+// had the crawler GET it.
+test("a destructive seed never reaches the crawl queue, whichever way it arrives", () => {
+  const frontier = createFrontier({ ...cfg, maxDepth: 5 } as QaConfig, new Set());
+  frontier.enqueue("https://target.test/", 0);
+  frontier.enqueue("https://target.test/account/delete", 1);
+  frontier.enqueue("https://target.test/users/7/deactivate", 0);
+  frontier.enqueue("https://target.test/ok", 1);
+
+  const queued = frontier.queue.map((j) => j.url);
+  assert.deepEqual(queued, ["https://target.test/", "https://target.test/ok"]);
+  assert.deepEqual(frontier.deniedSeeds, [
+    "https://target.test/account/delete",
+    "https://target.test/users/7/deactivate",
+  ]);
+});
+
+// C-04: a link kept only one accessible name - aria-label when present, else its text - so
+// <a aria-label="Details">Delete</a> was judged on "Details" and followed.
+test("a link is denied on EITHER of its names, like a button", () => {
+  const scoped = { ...cfg, include: [], exclude: [] } as unknown as QaConfig;
+  const { discovered, deniedLinks } = partitionLinks(
+    [
+      { href: "/items/7?confirm=1", label: "Details", alt: "Delete" },
+      { href: "/items/8?confirm=1", label: "Delete", alt: "Details" },
+      { href: "/items/9", label: "Details", alt: "View item" },
+    ],
+    "https://target.test/items",
+    scoped,
+  );
+  assert.deepEqual(deniedLinks, [
+    "https://target.test/items/7?confirm=1",
+    "https://target.test/items/8?confirm=1",
+  ]);
+  assert.deepEqual(discovered, ["https://target.test/items/9"]);
 });
 
 test("isAllowedUrl rejects lookalike and userinfo hosts", () => {
@@ -211,6 +249,21 @@ test("a deny-list exception still overrides the squash pass", () => {
   // known-safe path back in.
   const withException = { ...bankCfg, denyUrlExceptions: ["/billpay\\.htm$"] };
   assert.equal(isDeniedUrl("https://bank.test/billpay.htm", withException), false);
+});
+
+// C-03: exceptions were tested against the WHOLE URL, so the shipped '/add_remove_elements/?$'
+// matched a query string ending in it and exempted any route in front of it.
+test("a deny-list exception matches the path, not a query string that mentions it", () => {
+  const shipped = { ...cfg, denyUrlExceptions: ["/add_remove_elements/?$"] } as QaConfig;
+  for (const url of [
+    "https://target.test/account/delete?next=/add_remove_elements/",
+    "/account/delete?next=/add_remove_elements/",
+    "https://target.test/users/7/delete#/add_remove_elements/",
+  ]) {
+    assert.equal(isDeniedUrl(url, shipped), true, `exception must not exempt ${url}`);
+  }
+  assert.equal(isDeniedUrl("https://target.test/add_remove_elements/", shipped), false);
+  assert.equal(isDeniedUrl("/add_remove_elements/", shipped), false);
 });
 
 // ------------------------------------------------------------------ Burp XML

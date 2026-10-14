@@ -61,7 +61,7 @@ bigger crawl.
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `denyList` | string[] | *required* | Terms that mark a control or URL destructive. See [safety.md](safety.md). |
-| `denyUrlExceptions` | string[] | `[]` | Regexes for URLs that *look* destructive but are not. |
+| `denyUrlExceptions` | string[] | `[]` | Regexes for paths that *look* destructive but are not. Matched against the URL's **path only** — never the host, query string or fragment. |
 | `blockDomains` | string[] | *required* | Only consulted when `captureOffOrigin` is true; otherwise everything off-origin is blocked anyway. |
 
 `denyUrlExceptions` exists because URL matching has false positives. The demo target has a

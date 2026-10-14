@@ -20,6 +20,7 @@ import { request, type APIRequestContext } from "playwright";
 import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import { knownPersonas, type Persona } from "./personas.js";
 import type { PageRecord } from "./crawl.js";
+import { polite, PolitenessError } from "./polite.js";
 
 const FINDINGS = resolve(OUT, "authz-findings.jsonl");
 
@@ -157,7 +158,12 @@ export function isDenyEnvelope(body: string): boolean {
   const keys = Object.keys(obj);
   if (keys.length === 0 || keys.length > 5) return false;
 
+  // An `error`/`errors` key is the envelope itself, not returned data. Google-style
+  // {"error":{"message":"Unauthenticated"}} and JSON:API {"errors":[{"title":...}]} are the
+  // most common 401 bodies, and counting their nesting as data read them as the resource.
+  const isErrorKey = (k: string): boolean => /^errors?$/i.test(k);
   const carriesData = keys.some((k) => {
+    if (isErrorKey(k)) return false;
     const v = obj[k];
     if (Array.isArray(v)) return v.length > 0;
     return typeof v === "object" && v !== null && Object.keys(v as object).length > 0;
@@ -167,8 +173,17 @@ export function isDenyEnvelope(body: string): boolean {
   return keys.some((k) => {
     if (!/^(?:error|errors|detail|message|code|status|reason)$/i.test(k)) return false;
     const v = obj[k];
-    return typeof v === "string" && DENY_WORDS.test(v);
+    if (typeof v === "string") return DENY_WORDS.test(v);
+    return isErrorKey(k) && stringLeaves(v, 3).some((s) => DENY_WORDS.test(s));
   });
+}
+
+/** Every string inside a small nested value, to a bounded depth. */
+function stringLeaves(v: unknown, depth: number): string[] {
+  if (typeof v === "string") return [v];
+  if (depth === 0 || v === null || typeof v !== "object") return [];
+  const children = Array.isArray(v) ? v : Object.values(v as Record<string, unknown>);
+  return children.flatMap((c) => stringLeaves(c, depth - 1));
 }
 
 export function looksLikeLoginPage(body: string): boolean {
@@ -359,11 +374,17 @@ export const NEAR_MISS_FLOOR = 0.8;
 /** At most this many near-misses per run. Beyond it they are summarised, not enumerated. */
 const MAX_NEAR_MISSES = 5;
 
-async function probe(ctx: APIRequestContext, url: string, timeoutMs: number): Promise<Probe | null> {
+export async function probe(ctx: APIRequestContext, url: string, timeoutMs: number): Promise<Probe | null> {
+  // Through the shared limiter like every other requester; this scan used to go out
+  // unspaced and unbudgeted. Deliberately OUTSIDE the try: a PolitenessError means "stop
+  // the scan", and swallowing it as an unreachable probe would just spin to the end.
+  await polite().gate(url);
   try {
     // No redirect following: a 302 to /login is itself the answer, and following it would
     // turn a clean "denied" into a confusing 200.
     const res = await ctx.get(url, { maxRedirects: 0, timeout: timeoutMs, failOnStatusCode: false });
+    // So a run of 429s opens the breaker and the next gate() stops the scan.
+    polite().report(url, res.status(), res.headers()["retry-after"] ?? null);
     const body = await res.text().catch(() => "");
     return classify(res.status(), body);
   } catch {
@@ -509,6 +530,9 @@ async function main(): Promise<void> {
   // found" - a clean bill of health for a scan that never reached the site once.
   let attempted = 0;
   let unreachable = 0;
+  // Set when the limiter refuses a request (breaker open or budget spent). Comparing
+  // throttled bodies would only produce findings about the throttling.
+  let refused: string | null = null;
 
   try {
     for (const page of targets) {
@@ -612,6 +636,9 @@ async function main(): Promise<void> {
         }
       }
     }
+  } catch (err) {
+    if (!(err instanceof PolitenessError)) throw err;
+    refused = err.message;
   } finally {
     await Promise.allSettled([anon.dispose(), ...sessions.map((s) => s.ctx.dispose())]);
   }
@@ -642,8 +669,9 @@ async function main(): Promise<void> {
         nearMissesSuppressed,
         personas: personas.map((p) => p.id),
         sharedIdentity: shared,
+        ...(refused === null ? {} : { refused }),
         verdict:
-          ledger.compared === 0 || failRate > 0.25
+          refused !== null || ledger.compared === 0 || failRate > 0.25
             ? "inconclusive"
             : findings.length > 0
               ? "findings"
@@ -653,6 +681,13 @@ async function main(): Promise<void> {
       2,
     )}\n`,
   );
+  if (refused !== null) {
+    console.error(
+      `SCAN INCONCLUSIVE - stopped by the politeness limiter.\n  ${refused}\n` +
+        `  This is NOT a clean result.`,
+    );
+    process.exit(2);
+  }
   if (failRate > 0.25) {
     console.error(
       `SCAN INCONCLUSIVE - ${unreachable} of ${attempted} requests could not be completed ` +

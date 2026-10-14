@@ -603,6 +603,8 @@ async function collectHtml(
     if (p.ok === false) continue;
     if (seen.has(p.url)) continue;
     if (!isAllowedUrl(p.url, cfg)) continue;
+    // Same rule as runProbes: this scan is read-only, and a GET can still change state.
+    if (isDeniedUrl(p.url, cfg)) continue;
     seen.add(p.url);
     // A page the crawl already recorded as absent has no content to scan, and fetching it
     // again only to discover the same 404 wastes a request and then reports it as
@@ -642,9 +644,19 @@ async function collectHtml(
 
   let fetched = 0;
   let protectedPages = 0;
+  let redirects = 0;
   for (const url of targets) {
     try {
-      const res = await polite().fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      // Not followed: the redirect target was never scope- or deny-checked, and a page
+      // that 302s to /logout would have had this scan sign the session out.
+      const res = await polite().fetch(url, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.status >= 300 && res.status < 400) {
+        redirects++;
+        continue;
+      }
       if (res.ok) {
         html.set(url, (await res.text()).slice(0, 500_000));
         fetched++;
@@ -661,11 +673,12 @@ async function collectHtml(
 
   // Say what was actually examined. A count that does not add up is the signal that the
   // scan is narrower than the crawl, and it should be visible without reading the code.
-  const unreachable = targets.length - fetched - protectedPages;
+  const unreachable = targets.length - fetched - protectedPages - redirects;
   const parts = [`${fromCapture} from capture`];
   if (fromDisk > 0) parts.push(`${fromDisk} reused from the crawl`);
   parts.push(`${fetched} fetched`);
   if (protectedPages > 0) parts.push(`${protectedPages} protected (401/403)`);
+  if (redirects > 0) parts.push(`${redirects} redirect(s), not followed`);
   if (gone > 0) parts.push(`${gone} already 404/410 in the crawl`);
   if (unreachable > 0) parts.push(`${unreachable} unreachable`);
   if (overBound > 0) parts.push(`${overBound} NOT SCANNED - over the ${MAX_CONTENT_FETCH} cap`);

@@ -16,7 +16,7 @@
  * persona into that same account and marks the sessions as not independent. Replace the
  * body of `signUpAndLogIn` for a real target; everything around it stays.
  */
-import { test as setup, expect, safeClick, safeGoto } from "./fixtures.js";
+import { test as setup, expect, harden, safeClick, safeGoto } from "./fixtures.js";
 import { logIn } from "./login.js";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -46,6 +46,9 @@ setup("create personas and save a session for each", async ({ browser }) => {
   for (const persona of personas) {
     const context = await browser.newContext();
     const page = await context.newPage();
+    // A hand-built context gets none of the fixture's routing; without this the persona
+    // login was the one navigation in the suite free to load anything off-origin.
+    await harden(page);
     try {
       await signUpAndLogIn(page, persona);
       await context.storageState({ path: persona.statePath });
@@ -104,7 +107,8 @@ export async function signUpWithEmailVerification(
   } else {
     const [link] = extractLinks(body, new URL(cfg.baseUrl).host);
     if (!link) throw new Error(`No verification code or link in "${mail.subject}"`);
-    await page.goto(link, { waitUntil: "domcontentloaded" });
+    // Guarded: this URL came out of an email, which is exactly the input to distrust.
+    await safeGoto(page, link);
   }
 
   await expect(page).not.toHaveURL(/signup/);

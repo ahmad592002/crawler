@@ -106,7 +106,7 @@ export const FIELDS: FieldMeta[] = [
   { key: "denyList", label: "Deny list", group: "Safety", type: "stringList", sensitive: true,
     help: "Words and phrases the agent will never click, submit or navigate: delete, transfer, pay, cancel... Treated as a vocabulary for a concept - a control that destroys or spends something is withheld even if its exact word is not listed." },
   { key: "denyUrlExceptions", label: "Deny-list URL exceptions", group: "Safety", type: "stringList",
-    help: "Regular expressions for URLs that look destructive but are known-safe to visit, e.g. a demo's /add_remove_elements/ page." },
+    help: "Regular expressions for URL paths that look destructive but are known-safe to visit, e.g. a demo's /add_remove_elements/ page. Matched against the path only, never the query string." },
   { key: "blockDomains", label: "Blocked domains", group: "Safety", type: "stringList",
     help: "Third-party domains to always block, used only when 'Capture off-origin' is on." },
 

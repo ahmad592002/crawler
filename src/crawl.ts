@@ -271,10 +271,12 @@ export interface ControlInfo {
   alt: string;
 }
 
-/** A link, with the anchor text kept so the deny-list can be applied to it. */
+/** A link, with BOTH candidate names kept so the deny-list can be applied to it. */
 export interface AnchorInfo {
   href: string;
   label: string;
+  /** The other name, as in ControlInfo. One name let aria-label="Details" hide "Delete". */
+  alt: string;
 }
 
 interface Harvest {
@@ -317,12 +319,12 @@ async function harvest(page: Page): Promise<Harvest> {
       ).slice(0, 80);
     };
 
-    const anchors: { href: string; label: string }[] = [];
+    const anchors: { href: string; label: string; alt: string }[] = [];
     for (const a of document.querySelectorAll<HTMLElement>("a[href], [role=link], [data-href]")) {
       const h = a.getAttribute("href") ?? a.getAttribute("data-href");
       // The anchor text travels with the href so the deny-list can be applied to links,
       // not only to buttons. "Delete account" as a link used to be followed silently.
-      if (h) anchors.push({ href: h, label: names(a).label || names(a).alt });
+      if (h) anchors.push({ href: h, ...names(a) });
     }
 
     const forms = [...document.querySelectorAll("form")].map((f) => ({
@@ -355,6 +357,32 @@ async function harvest(page: Page): Promise<Harvest> {
       links: document.querySelectorAll("a[href]").length,
     };
   });
+}
+
+/**
+ * Split harvested links into the ones to follow and the ones withheld as destructive.
+ *
+ * Links are filtered by the deny-list too. Previously isDenied was applied only to
+ * button labels while <a href="/users/7/delete">Delete</a> was queued and GET-ted by
+ * the crawler itself - the destructive action fired without anything "clicking" it.
+ */
+export function partitionLinks(
+  anchors: AnchorInfo[],
+  base: string,
+  cfg: QaConfig,
+): { discovered: string[]; deniedLinks: string[] } {
+  const discovered: string[] = [];
+  const deniedLinks: string[] = [];
+  for (const a of anchors) {
+    const n = normalizeUrl(a.href, base);
+    if (!n || !inScope(n, cfg)) continue;
+    if (isDeniedUrl(n, cfg) || isDenied(a.label, cfg) || isDenied(a.alt, cfg)) {
+      deniedLinks.push(n);
+      continue;
+    }
+    discovered.push(n);
+  }
+  return { discovered, deniedLinks };
 }
 
 const LOGIN_HINT = /\b(log ?in|sign ?in|authenticate)\b/i;
@@ -397,6 +425,9 @@ async function visit(
     await politeClient(cfg).gate(url);
     const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: cfg.navTimeoutMs });
     status = res?.status() ?? null;
+    // Hand the answer back. Gating alone paced the crawl but never heard a 429, so the
+    // breaker and backoff could not trip on the requester that makes the most requests.
+    if (res) politeClient(cfg).report(url, res.status(), res.headers()["retry-after"] ?? null);
     // Bounded quiet period - never an unbounded networkidle, which can hang forever.
     await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => {});
     finalUrl = page.url();
@@ -489,20 +520,7 @@ async function visit(
   const authRequired =
     redirected && (LOGIN_HINT.test(normFinal) || LOGIN_HINT.test(info.title)) ;
 
-  // Links are filtered by the deny-list too. Previously isDenied was applied only to
-  // button labels while <a href="/users/7/delete">Delete</a> was queued and GET-ted by
-  // the crawler itself - the destructive action fired without anything "clicking" it.
-  const discovered: string[] = [];
-  const deniedLinks: string[] = [];
-  for (const a of info.anchors) {
-    const n = normalizeUrl(a.href, finalUrl);
-    if (!n || !inScope(n, cfg)) continue;
-    if (isDeniedUrl(n, cfg) || isDenied(a.label, cfg)) {
-      deniedLinks.push(n);
-      continue;
-    }
-    discovered.push(n);
-  }
+  const { discovered, deniedLinks } = partitionLinks(info.anchors, finalUrl, cfg);
 
   await page.close().catch(() => {});
 
@@ -539,6 +557,51 @@ async function visit(
 }
 
 // ---------------------------------------------------------------- driver
+
+export interface Frontier {
+  queue: { url: string; depth: number }[];
+  /** URLs refused at the door because they look destructive. Never fetched. */
+  deniedSeeds: string[];
+  enqueue(url: string, depth: number): void;
+}
+
+/** The crawl queue. Every URL the crawler will ever fetch enters through enqueue(). */
+export function createFrontier(cfg: QaConfig, done: Set<string>): Frontier {
+  const queue: { url: string; depth: number }[] = [];
+  const deniedSeeds: string[] = [];
+  const queued = new Set<string>([...done]);
+
+  // Seed the per-template counts from what a previous run already recorded. enqueue()
+  // returns early for a known URL and never reaches the counter, so starting these at
+  // zero would let a resumed run collect 3 MORE samples of every template.
+  const perTemplate = new Map<string, number>();
+  for (const url of done) {
+    const t = templateOf(url);
+    perTemplate.set(t, (perTemplate.get(t) ?? 0) + 1);
+  }
+
+  // Dedup on the key, but queue (and later fetch) the URL exactly as the site published it.
+  const enqueue = (url: string, depth: number): void => {
+    const key = dedupKey(url);
+    if (queued.has(key) || depth > cfg.maxDepth) return;
+    // The deny check lives HERE, not only on harvested links. baseUrl, the auth landing
+    // and sitemap <loc> entries never pass through visit()'s link filter, so a sitemap
+    // listing /account/delete used to be queued and GET-ted by the crawler itself.
+    if (isDeniedUrl(url, cfg)) {
+      queued.add(key); // record it once, however many pages link to it
+      deniedSeeds.push(url);
+      return;
+    }
+    const t = templateOf(key);
+    const n = perTemplate.get(t) ?? 0;
+    if (n >= 3) return; // at most 3 samples per page shape
+    perTemplate.set(t, n + 1);
+    queued.add(key);
+    queue.push({ url, depth });
+  };
+
+  return { queue, deniedSeeds, enqueue };
+}
 
 /**
  * Dedup keys of pages a previous run actually LOADED.
@@ -662,29 +725,7 @@ async function main(): Promise<void> {
   });
 
   const base = normalizeUrl(cfg.baseUrl) ?? cfg.baseUrl;
-  const queue: { url: string; depth: number }[] = [];
-  const queued = new Set<string>([...done]);
-
-  // Seed the per-template counts from what a previous run already recorded. enqueue()
-  // returns early for a known URL and never reaches the counter, so starting these at
-  // zero would let a resumed run collect 3 MORE samples of every template.
-  const perTemplate = new Map<string, number>();
-  for (const url of done) {
-    const t = templateOf(url);
-    perTemplate.set(t, (perTemplate.get(t) ?? 0) + 1);
-  }
-
-  // Dedup on the key, but queue (and later fetch) the URL exactly as the site published it.
-  const enqueue = (url: string, depth: number): void => {
-    const key = dedupKey(url);
-    if (queued.has(key) || depth > cfg.maxDepth) return;
-    const t = templateOf(key);
-    const n = perTemplate.get(t) ?? 0;
-    if (n >= 3) return; // at most 3 samples per page shape
-    perTemplate.set(t, n + 1);
-    queued.add(key);
-    queue.push({ url, depth });
-  };
+  const { queue, deniedSeeds, enqueue } = createFrontier(cfg, done);
 
   enqueue(base, 0);
 
@@ -853,6 +894,10 @@ async function main(): Promise<void> {
     console.log(`THIS CRAWL PROVED LITTLE: ${verdict.verdict}`);
     console.log(`  ${verdict.reason}`);
     console.log(`${"!".repeat(60)}`);
+  }
+  if (deniedSeeds.length > 0) {
+    console.log(`refused (deny-list), never fetched: ${deniedSeeds.length}`);
+    for (const u of deniedSeeds.slice(0, 10)) console.log(`  - ${u}`);
   }
   console.log(`pages w/ errors: ${withErrors.length}`);
   for (const r of withErrors.slice(0, 10)) {

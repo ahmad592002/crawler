@@ -15,7 +15,15 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { collectHtml } from "./deploy-check.js";
-import { setPoliteClient, resetPoliteClient, createPoliteClient, DEFAULT_POLITE } from "./polite.js";
+import { request } from "playwright";
+import { probe } from "./authz-check.js";
+import {
+  setPoliteClient,
+  resetPoliteClient,
+  createPoliteClient,
+  DEFAULT_POLITE,
+  PolitenessError,
+} from "./polite.js";
 import type { PageRecord } from "./crawl.js";
 import type { QaConfig } from "./config.js";
 
@@ -77,22 +85,26 @@ test("the content scan really is paced - gaps appear in the server's own log", a
   setPoliteClient(createPoliteClient({ ...DEFAULT_POLITE, delayMs: DELAY, budget: 0 }));
 
   try {
-    const pages = [1, 2, 3, 4].map((n) => page(`${srv.origin}/p${n}`));
+    // p0 is a warm-up. The limiter spaces requests by when they are SENT, but the server
+    // logs when they ARRIVE, and the first request also pays for opening the connection.
+    // Under a loaded test run that made gap 1 read ~220ms for a correct 300ms spacing, so
+    // gap 1 (connection setup included) is checked only through `elapsed` below.
+    const pages = [0, 1, 2, 3, 4].map((n) => page(`${srv.origin}/p${n}`));
     const started = Date.now();
     const html = await collectHtml(pages, [], cfgFor(srv.origin), 5_000);
     const elapsed = Date.now() - started;
 
-    assert.equal(html.size, 4, "all four pages were still fetched");
-    assert.equal(srv.hits.length, 4);
+    assert.equal(html.size, 5, "all five pages were still fetched");
+    assert.equal(srv.hits.length, 5);
 
-    // Three gaps between four requests. Allow slack for scheduling, but the floor is what
+    // Four gaps between five requests. Allow slack for scheduling, but the floor is what
     // matters: without the limiter this loop completes in a few milliseconds.
     assert.ok(
-      elapsed >= DELAY * 3 * 0.9,
-      `expected at least ~${DELAY * 3}ms of spacing, took ${elapsed}ms`,
+      elapsed >= DELAY * 4 * 0.9,
+      `expected at least ~${DELAY * 4}ms of spacing, took ${elapsed}ms`,
     );
 
-    for (let i = 1; i < srv.hits.length; i++) {
+    for (let i = 2; i < srv.hits.length; i++) {
       const gap = (srv.hits[i] ?? 0) - (srv.hits[i - 1] ?? 0);
       assert.ok(gap >= DELAY * 0.8, `gap ${i} was ${gap}ms, expected ~${DELAY}ms`);
     }
@@ -148,5 +160,73 @@ test("a healthy server is not slowed down beyond its configured gap", async () =
   } finally {
     resetPoliteClient();
     await srv.stop();
+  }
+});
+
+// C-09: the authorization scan issued its GETs through a raw Playwright request context -
+// no spacing, no budget, no breaker - while every other requester went through the limiter.
+test("authz probes are paced and stop at the request budget", async () => {
+  const srv = await start();
+  const DELAY = 200;
+  setPoliteClient(createPoliteClient({ ...DEFAULT_POLITE, delayMs: DELAY, budget: 3 }));
+  const ctx = await request.newContext();
+
+  try {
+    let refused: unknown = null;
+    for (const n of [1, 2, 3, 4, 5]) {
+      try {
+        await probe(ctx, `${srv.origin}/p${n}`, 5_000);
+      } catch (err) {
+        refused = err;
+        break;
+      }
+    }
+
+    assert.equal(srv.hits.length, 3, `budget of 3, server saw ${srv.hits.length} requests`);
+    assert.ok(
+      refused instanceof PolitenessError && refused.kind === "budget",
+      "the probe past the budget is refused, not silently skipped",
+    );
+    for (let i = 1; i < srv.hits.length; i++) {
+      const gap = (srv.hits[i] ?? 0) - (srv.hits[i - 1] ?? 0);
+      assert.ok(gap >= DELAY * 0.8, `gap ${i} was ${gap}ms, expected ~${DELAY}ms`);
+    }
+  } finally {
+    await ctx.dispose();
+    resetPoliteClient();
+    await srv.stop();
+  }
+});
+
+// C-02: the pre-deploy content scan re-fetched inventory URLs with only the origin check,
+// and followed redirects - so a recorded /account/delete, or a page that 302s to /logout,
+// was requested by a scan that is meant to be read-only.
+test("the content scan never requests a destructive URL, directly or via a redirect", async () => {
+  const paths: string[] = [];
+  const server: Server = createServer((req, res) => {
+    paths.push(req.url ?? "");
+    if (req.url === "/r") {
+      res.writeHead(302, { location: "/logout" });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><body>page</body></html>");
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  setPoliteClient(createPoliteClient({ ...DEFAULT_POLITE, delayMs: 0, budget: 0 }));
+
+  try {
+    const pages = ["/ok", "/account/delete", "/r"].map((p) => page(`${origin}${p}`));
+    const html = await collectHtml(pages, [], cfgFor(origin), 5_000);
+
+    assert.ok(!paths.includes("/account/delete"), `requested: ${paths.join(", ")}`);
+    assert.ok(!paths.includes("/logout"), `followed a redirect: ${paths.join(", ")}`);
+    assert.ok(html.has(`${origin}/ok`), "the safe page is still scanned");
+    assert.ok(!html.has(`${origin}/r`), "a redirect stub is not a document to scan");
+  } finally {
+    resetPoliteClient();
+    await new Promise<void>((r) => server.close(() => r()));
   }
 });

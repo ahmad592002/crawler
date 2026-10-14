@@ -12,7 +12,16 @@
  * skipped templates rather than removed - the structure is the point, and it is the part
  * that is easy to get subtly wrong.
  */
-import { test, expect, safeClick, withTwoUsers, openAs, openAnonymous } from "./fixtures.js";
+import {
+  test,
+  expect,
+  safeClick,
+  safeGoto,
+  safeGotoResponse,
+  withTwoUsers,
+  openAs,
+  openAnonymous,
+} from "./fixtures.js";
 import { knownPersonas } from "../src/personas.js";
 
 const personas = knownPersonas();
@@ -63,7 +72,7 @@ test.describe("two users", () => {
       await expect(userB.page.getByText("private-")).toHaveCount(0);
 
       // And must not reach it by URL either - the check people forget.
-      const res = await userB.page.goto(url);
+      const res = await safeGotoResponse(userB.page, url);
       expect(res?.status(), "B could open A's document directly").toBeGreaterThanOrEqual(400);
     });
   });
@@ -77,7 +86,7 @@ test.describe("two users", () => {
       await safeClick(userA.page, "Create");
       const url = userA.page.url();
 
-      const res = await stranger.page.goto(url);
+      const res = await safeGotoResponse(stranger.page, url);
       // 200 here is the bug that matters: protected from other users, public to the world.
       expect(res?.status(), "signed-out visitor could open the resource").toBeGreaterThanOrEqual(400);
     } finally {
@@ -102,7 +111,7 @@ test.describe("two users", () => {
       const [link] = extractLinks(`${mail.text}\n${mail.html}`, "invite");
       expect(link, "no invitation link in the email B received").toBeTruthy();
 
-      await userB.page.goto(link!);
+      await safeGoto(userB.page, link!);
       await safeClick(userB.page, /accept/i);
 
       // Both sides must agree afterwards, which is the half that usually breaks.

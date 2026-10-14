@@ -228,6 +228,42 @@ test("gate paces browser navigations without making a request", async () => {
   assert.equal(calls.length, 0, "gate must not issue a request of its own");
 });
 
+// C-10: crawler navigations were gated but their answers were never looked at, so a crawl
+// against a server answering 429 on every page could never trip the breaker or back off.
+test("report() feeds navigation answers into the breaker", async () => {
+  const clock = fakeTime();
+  const { impl, calls } = stubFetch([]);
+  const c = createPoliteClient(cfg({ breakAfter: 3, delayMs: 0 }), { ...clock, fetchImpl: impl });
+
+  for (const p of ["a", "b", "c"]) {
+    await c.gate(`https://t.test/${p}`);
+    c.report(`https://t.test/${p}`, 429);
+  }
+  assert.ok(c.throttled(), "three 429 navigations in a row open the breaker");
+  assert.equal(c.stats().rateLimited, 3);
+  assert.equal(calls.length, 0, "report() never makes a request of its own");
+  await assert.rejects(
+    () => c.gate("https://t.test/d"),
+    (e: unknown) => e instanceof PolitenessError && e.kind === "breaker",
+  );
+});
+
+test("report() honours Retry-After on the next gate, and a success resets strikes", async () => {
+  const clock = fakeTime();
+  const { impl } = stubFetch([]);
+  const c = createPoliteClient(cfg({ breakAfter: 2, delayMs: 0 }), { ...clock, fetchImpl: impl });
+
+  await c.gate("https://t.test/a");
+  c.report("https://t.test/a", 503, "5");
+  const start = clock.value;
+  await c.gate("https://t.test/b");
+  assert.equal(clock.value - start, 5000, "the origin is held back for Retry-After");
+
+  c.report("https://t.test/b", 200);
+  c.report("https://t.test/c", 429);
+  assert.equal(c.throttled(), false, "a success in between resets the strike run");
+});
+
 test("retryAfterMs reads both forms and rejects nonsense", () => {
   const now = Date.parse("2026-01-01T00:00:00Z");
   assert.equal(retryAfterMs("5", now), 5000);

@@ -63,7 +63,7 @@ export { expect };
  * it would wait on third-party subresources the first page never sees - and fail in a way
  * that looks like the feature is broken.
  */
-async function harden(page: Page): Promise<void> {
+export async function harden(page: Page): Promise<void> {
   if (!cfg.captureOffOrigin) {
     await page.route(
       (url) => !isAllowedUrl(url.toString(), cfg),
