@@ -29,6 +29,27 @@ Subagents cannot start other subagents. The main session is always the coordinat
 | 7 | `qa-reporter` | no | Merges duplicate findings, calibrates severity, checks every finding is reproducible, builds the report |
 | 8 | `qa-ci` | no | Checks the pipeline and CI hygiene, especially that no artifact leaks credentials |
 
+## Improving the tool itself
+
+The agents above test a *target website*. A second loop improves *this repository*, and
+runs one round at a time with `/improve` (`.claude/commands/improve.md`):
+
+```
+qa-improve-test  ─┐
+                  ├─> qa-improve-filter ─> qa-improve-enhance
+qa-improve-check ─┘
+```
+
+| Agent | Writes | Job |
+|---|---|---|
+| `qa-improve-test` | new `src/*.extra.test.ts`, report | Typecheck, unit tests, lint, and new tests for untested risky logic |
+| `qa-improve-check` | report only | Guard gaps, politeness bypasses, secret leaks, bugs, docs vs code |
+| `qa-improve-filter` | report + `backlog.jsonl` | Re-verifies every finding; rejects false positives, by-design items and duplicates; ranks the rest |
+| `qa-improve-enhance` | product code, tests, docs | Fixes backlog items test-first; never weakens a guard; never commits |
+
+Reports go to `output/improve/round-<N>/` (git-ignored). The filter is the most important
+step: a finding goes nowhere unless the filter has re-checked it against the code.
+
 ## Rules every agent follows
 
 `CLAUDE.md` applies to every agent. Three extra rules exist only because there are
