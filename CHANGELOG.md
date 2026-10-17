@@ -6,6 +6,71 @@ An adversarial review of the whole codebase. Each item below is a defect that wa
 **demonstrated by running code**, not a theoretical concern, and each has a regression
 test in `src/guards.test.ts` (17 tests, offline, wired into CI as `npm run test:unit`).
 
+### Fixed — improvement round 2
+
+- **The pre-deploy scan reported clean when it reached nothing.** Every probe error and
+  every limiter refusal was swallowed like a 404, so a run against a target that was down
+  (or whose request budget was spent) printed "No critical or high findings." and exited 0.
+  The scan now counts attempted and failed probes and records a refusal; if the limiter
+  refused or more than 25% of probes failed it prints `SCAN INCONCLUSIVE`, exits 2, and
+  writes `output/deploy-status.json` with `verdict: "inconclusive"` - as `npm run authz`
+  already did.
+
+- **`denyUrlExceptions` matched the tail of a path.** The patterns were unanchored, so the
+  shipped `/add_remove_elements/?$` also exempted `/account/delete/add_remove_elements/`,
+  `/account/delete.php/add_remove_elements/` and `/account/delete;/add_remove_elements/`.
+  Each pattern must now match the whole path (`^(?:pattern)$`), and a path containing `;`
+  or a `.ext/` segment is never exempted. Existing configs are safe without edits; the
+  shipped exception still exempts `/add_remove_elements` with or without the slash.
+
+- **A literal `page.goto` in a spec was neither linted nor guarded.** The fixture's `goto`
+  wrapper only set `waitUntil`, and the lint exempted any literal starting with `/` -
+  including `"//evil.test/x"` and `"/users/7/delete"`. The fixture page and every
+  `harden()`ed page now run `guardNavigation` (the same scope + deny check as `safeGoto`)
+  before navigating, and the lint flags protocol-relative and deny-listed literals and
+  `goto?.(` / `goto.bind|call|apply`. Consequence: `interactions.spec.ts`'s drag-and-drop
+  test is now skipped as destructive, because `/drag_and_drop` matches the built-in `drop`
+  route verb; it runs again if a reviewed `denyUrlExceptions` entry is added.
+
+- **Icon links and long labels escaped the crawl's deny check.** Only `aria-label` and
+  `textContent` were read, each cut to 80 characters in the page, so `<a title="Delete
+  order">` or `<a><img alt="Delete"></a>` was queued and fetched, and a label padded past
+  80 characters hid its last word. Links and controls now carry every candidate name
+  (`title`, `aria-labelledby`, descendant `img[alt]`, `<svg><title>`) untruncated, and are
+  denied if any matches; only the display label is shortened (`namesFrom()` in `crawl.ts`).
+
+- **The report's stale-results warning vanished under `QA_OUT`.** It looked for specs at
+  `OUT/../tests` (`output/tests` for `QA_OUT=output/shop`) and read that directory flat,
+  so `tests/generated/` was never checked. It now reads the checkout's `tests/` recursively.
+
+- **A crawl stopped by the limiter kept going and exited 0.** A `PolitenessError` (budget
+  spent, breaker open) was caught as a navigation failure, so every remaining queued job
+  was written as an `ok:false` record and `npm run qa` carried on against a throttling
+  target. The worker pool (`runPool()` in `crawl.ts`) now stops every worker on the first
+  refusal and writes no record for it; `crawl-status.<mode>.json` carries `refused`, the
+  crawl exits 3, and `qa.ts` then skips the remaining network steps (tests, auth crawl,
+  authz, pre-deploy) while still building coverage and the report.
+
+- **Docs misstated the gate.** `ci.md`/`architecture.md` described a 4-step pipeline and a
+  findings-only gate. They now list all 7 steps, state that any failed step (soft or not)
+  fails the run, that deploy and authz critical/high findings do gate CI, and that
+  `requestDelayMs`/`maxRequests`/the breaker are per step and do not apply to the
+  Playwright suite (`config.ts` and the config editor help said "for one run").
+
+- **Preflight requested destructive-looking assets and followed their redirects.** Page
+  assets were filtered by `isAllowedUrl` only, so `<script src="/session/logout.js">` was
+  fetched. Assets are now also `isDeniedUrl`-checked and probed with `redirect: "manual"`.
+
+- **The crawl frontier enforced the deny-list but not the origin scope.** `enqueue()` relied
+  on every caller to filter by origin, and `baseUrl` was enqueued unchecked. It now refuses
+  anything `isAllowedUrl` rejects, so the queue is the single scope gate it claims to be.
+
+- **Concurrent crawl navigations overspent the budget and outran the breaker.**
+  `gate()` checked the budget and breaker only before waiting for the origin's slot, so N
+  workers all passed while `sent` was under `maxRequests`, and a navigation queued behind
+  the spacing went out after the breaker had opened. It now re-checks after the wait and
+  counts in the same synchronous section, as `fetch()` already did.
+
 ### Fixed — improvement round 1
 
 - **Crawl seeds bypassed the deny-list.** Only harvested links were deny-checked; baseUrl,

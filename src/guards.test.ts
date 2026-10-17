@@ -266,6 +266,23 @@ test("a deny-list exception matches the path, not a query string that mentions i
   assert.equal(isDeniedUrl("/add_remove_elements/", shipped), false);
 });
 
+// C-30: the exception was an UNANCHORED regex on the path, so '/add_remove_elements/?$'
+// matched the tail of any path that ended in it, and the delete in front was exempted.
+test("a deny-list exception must match the whole path, not its tail", () => {
+  const shipped = { ...cfg, denyUrlExceptions: ["/add_remove_elements/?$"] } as QaConfig;
+  for (const url of [
+    "https://target.test/account/delete/add_remove_elements/",
+    "https://target.test/account/delete.php/add_remove_elements/",
+    "https://target.test/account/delete;/add_remove_elements/",
+    "/account/delete/add_remove_elements",
+  ]) {
+    assert.equal(isDeniedUrl(url, shipped), true, `exception must not exempt ${url}`);
+  }
+  // ...while the page it was written for is still exempted, with or without the slash.
+  assert.equal(isDeniedUrl("https://target.test/add_remove_elements/", shipped), false);
+  assert.equal(isDeniedUrl("https://target.test/add_remove_elements", shipped), false);
+});
+
 // ------------------------------------------------------------------ Burp XML
 
 const exchange: HttpExchange = {

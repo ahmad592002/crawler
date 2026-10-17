@@ -1,5 +1,6 @@
 /**
- * One-command pipeline: crawl -> authenticated crawl -> tests -> report.
+ * One-command pipeline: crawl -> tests -> authenticated crawl -> authz scan -> pre-deploy
+ * scan -> coverage -> report.
  *
  *   npm run qa
  *
@@ -7,8 +8,9 @@
  * POSIX, and so the report is still produced when the test step fails - a failing suite
  * is exactly when you most want to look at the report.
  *
- * Exit code: non-zero if any critical/high finding is present, or a step other than the
- * test step failed. Test failures alone do not mask the report.
+ * Exit code: non-zero if any critical/high finding is present (findings, deploy-findings or
+ * authz-findings), or if ANY step failed. "Soft" only means the pipeline carries on after
+ * that step fails - a soft failure still fails the run. Test failures do not stop the report.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -23,21 +25,36 @@ interface Step {
   soft?: boolean;
   /** Skip when this returns false. */
   when?: () => boolean;
+  /** Why `when` skips it, for the log. */
+  whenNot?: string;
+  /** Talks to the target. Skipped once a crawl has been stopped by the limiter. */
+  network?: boolean;
 }
 
+/**
+ * crawl.ts exits 3 when the politeness limiter stopped it: the budget is spent or the
+ * target rate-limited the run. Every later network step would hit the same throttled
+ * origin and report the throttling as findings, so they are skipped; coverage and the
+ * report still run, and say what happened. (A literal, not imported: importing crawl.ts
+ * would load Playwright into the orchestrator.)
+ */
+const CRAWL_REFUSED_EXIT = 3;
+
 const steps: Step[] = [
-  { name: "crawl (anon)", argv: ["tsx", "src/crawl.ts", "--mode=anon"] },
+  { name: "crawl (anon)", argv: ["tsx", "src/crawl.ts", "--mode=anon"], network: true },
   // The test run comes FIRST, because its `setup` project is what logs in and writes
   // output/auth/state.json. With the authenticated crawl ordered ahead of it, a fresh
   // checkout never had a session yet, the `when` guard reported a clean skip, and CI
   // silently never crawled a single authenticated page - on every run, forever.
-  { name: "playwright test", argv: ["playwright", "test"], soft: true },
+  { name: "playwright test", argv: ["playwright", "test"], soft: true, network: true },
   {
     name: "crawl (auth)",
     argv: ["tsx", "src/crawl.ts", "--mode=auth"],
     soft: true,
+    network: true,
     // Needs a saved session; skip cleanly rather than failing the run.
     when: () => existsSync(resolve(OUT, "auth", "state.json")),
+    whenNot: "no saved session at output/auth/state.json",
   },
   // Soft: a dirty build should still produce a report saying so, rather than stopping
   // here. The gate at the end is what turns critical/high findings into a non-zero exit.
@@ -45,10 +62,12 @@ const steps: Step[] = [
     name: "authorization scan",
     argv: ["tsx", "src/authz-check.ts"],
     soft: true,
+    network: true,
     // Needs the authenticated crawl above to have produced something to probe.
     when: () => existsSync(resolve(OUT, "pages.auth.jsonl")),
+    whenNot: "no output/pages.auth.jsonl",
   },
-  { name: "pre-deploy scan", argv: ["tsx", "src/deploy-check.ts"], soft: true },
+  { name: "pre-deploy scan", argv: ["tsx", "src/deploy-check.ts"], soft: true, network: true },
   { name: "coverage", argv: ["tsx", "src/coverage.ts"], soft: true },
   { name: "report", argv: ["tsx", "src/report.ts"] },
 ];
@@ -93,16 +112,31 @@ function highSeverityCount(): number {
 
 const failures: string[] = [];
 const skipped: string[] = [];
+let throttled = false;
 
 for (const step of steps) {
+  if (throttled && step.network) {
+    skipped.push(step.name);
+    console.log(`\n- skipped: ${step.name} (a crawl was stopped by the politeness limiter)`);
+    continue;
+  }
   if (step.when && !step.when()) {
     skipped.push(step.name);
-    console.log(`\n- skipped: ${step.name} (no saved session at output/auth/state.json)`);
+    console.log(`\n- skipped: ${step.name} (${step.whenNot ?? "precondition not met"})`);
     continue;
   }
   const code = run(step);
   if (code !== 0) {
     failures.push(step.name);
+    if (code === CRAWL_REFUSED_EXIT && step.argv.includes("src/crawl.ts")) {
+      // Still a failure for the exit code; only the remaining network steps are skipped.
+      throttled = true;
+      console.error(
+        `\nStep "${step.name}" was stopped by the politeness limiter. Skipping the remaining ` +
+          `network steps; coverage and the report still run.`,
+      );
+      continue;
+    }
     if (!step.soft) {
       console.error(`\nStep "${step.name}" failed (exit ${code}) and is required. Stopping.`);
       process.exit(code);

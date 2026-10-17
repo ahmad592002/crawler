@@ -15,7 +15,7 @@ import { loadConfig, isAllowedUrl, isDenied, isDeniedUrl, ROOT, type QaConfig, O
 import { recordHistory, writeBurpXml, drainHistory, historyJsonl, historyXml } from "./http-history.js";
 import { acquireLock } from "./runlock.js";
 import { judgeCrawl } from "./crawl-verdict.js";
-import { politeClient } from "./polite.js";
+import { politeClient, PolitenessError } from "./polite.js";
 import { detectCaptcha, isBlocked, type CaptchaSignal } from "./captcha.js";
 
 const SHOTS = resolve(OUT, "screenshots");
@@ -269,6 +269,8 @@ export interface ControlInfo {
   label: string;
   /** The other candidate name (aria-label when label came from text, and vice versa). */
   alt: string;
+  /** Every candidate name, untruncated - what the deny-list is matched against. */
+  names?: string[];
 }
 
 /** A link, with BOTH candidate names kept so the deny-list can be applied to it. */
@@ -277,6 +279,48 @@ export interface AnchorInfo {
   label: string;
   /** The other name, as in ControlInfo. One name let aria-label="Details" hide "Delete". */
   alt: string;
+  /** As in ControlInfo. */
+  names?: string[];
+}
+
+/** Every name a link or control can be known by, as read off the DOM. Untruncated. */
+export interface RawNames {
+  aria: string;
+  /** textContent, or `value` for an input. */
+  text: string;
+  title: string;
+  /** Text of the elements aria-labelledby points at. */
+  labelledBy: string;
+  /** alt of descendant images (and of the element itself, for input type=image). */
+  imgAlt: string[];
+  /** Text of descendant <svg><title>. */
+  svgTitle: string[];
+}
+
+/**
+ * Display names plus the full candidate list.
+ *
+ * aria-label and text alone missed every icon link: <a title="Delete order"> or
+ * <a><img alt="Delete"></a> had two empty names and was queued and fetched. And the names
+ * were cut to 80 characters in the page, so padding a label pushed the word out of reach.
+ * Now the deny-list sees every name in full; only `label`/`alt` are cut, for display.
+ */
+export function namesFrom(raw: RawNames): { label: string; alt: string; names: string[] } {
+  const clean = (s: string): string => s.replace(/\s+/g, " ").trim();
+  const aria = clean(raw.aria);
+  const txt = clean(raw.text);
+  const [label, alt] = aria ? [aria, txt] : [txt, aria];
+  const names = [aria, txt, raw.title, raw.labelledBy, ...raw.imgAlt, ...raw.svgTitle]
+    .map(clean)
+    .filter((s) => s.length > 0);
+  // Something to show for an icon-only control, which used to be dropped as nameless.
+  const shown = label || names[0] || "";
+  return { label: shown.slice(0, 80), alt: alt.slice(0, 80), names: [...new Set(names)] };
+}
+
+/** Denied if ANY name matches - the two display names and every other candidate. */
+function deniedByName(c: ControlInfo | AnchorInfo, cfg: QaConfig): boolean {
+  return [c.label, c.alt, ...(c.names ?? [])].some((n) => isDenied(n, cfg));
 }
 
 interface Harvest {
@@ -289,19 +333,27 @@ interface Harvest {
 }
 
 async function harvest(page: Page): Promise<Harvest> {
-  return page.evaluate(() => {
-    const clean = (s: string | null | undefined): string =>
-      (s ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
-
-    // Both names are returned, never just one. Reading `aria-label ?? textContent` meant
+  const raw = await page.evaluate(() => {
+    // Every name is returned, never just one. Reading `aria-label ?? textContent` meant
     // a button reading "Delete" with aria-label="Confirm" was classified as safe - and a
     // button reading "Confirm" with aria-label="Delete account" as unsafe. Only checking
-    // both can be correct.
-    const names = (el: Element): { label: string; alt: string } => {
-      const aria = clean(el.getAttribute("aria-label"));
-      const txt = clean(el.tagName === "INPUT" ? el.getAttribute("value") : el.textContent);
-      return aria ? { label: aria, alt: txt } : { label: txt, alt: aria };
-    };
+    // all of them can be correct. Untruncated and uncleaned: namesFrom() does that in
+    // Node, where it can be tested.
+    const names = (el: Element) => ({
+      aria: el.getAttribute("aria-label") ?? "",
+      text: (el.tagName === "INPUT" ? el.getAttribute("value") : el.textContent) ?? "",
+      title: el.getAttribute("title") ?? "",
+      labelledBy: (el.getAttribute("aria-labelledby") ?? "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent ?? "")
+        .join(" "),
+      imgAlt: [
+        ...(el.hasAttribute("alt") ? [el.getAttribute("alt") ?? ""] : []),
+        ...[...el.querySelectorAll("img[alt]")].map((i) => i.getAttribute("alt") ?? ""),
+      ],
+      svgTitle: [...el.querySelectorAll("svg title")].map((t) => t.textContent ?? ""),
+    });
 
     const labelFor = (el: Element): string => {
       const id = el.getAttribute("id");
@@ -319,20 +371,20 @@ async function harvest(page: Page): Promise<Harvest> {
       ).slice(0, 80);
     };
 
-    const anchors: { href: string; label: string; alt: string }[] = [];
+    const anchors: { href: string; raw: ReturnType<typeof names> }[] = [];
     for (const a of document.querySelectorAll<HTMLElement>("a[href], [role=link], [data-href]")) {
       const h = a.getAttribute("href") ?? a.getAttribute("data-href");
       // The anchor text travels with the href so the deny-list can be applied to links,
       // not only to buttons. "Delete account" as a link used to be followed silently.
-      if (h) anchors.push({ href: h, ...names(a) });
+      if (h) anchors.push({ href: h, raw: names(a) });
     }
 
     const forms = [...document.querySelectorAll("form")].map((f) => ({
       action: f.getAttribute("action") ?? "",
       method: (f.getAttribute("method") ?? "get").toLowerCase(),
-      submitLabels: [...f.querySelectorAll("button, input[type=submit], input[type=button]")]
-        .flatMap((b) => [names(b).label, names(b).alt])
-        .filter((s) => s.length > 0),
+      submitRaw: [
+        ...f.querySelectorAll("button, input[type=submit], input[type=button], input[type=image]"),
+      ].map(names),
       fields: [...f.querySelectorAll("input, select, textarea")]
         .filter((el) => (el.getAttribute("type") ?? "") !== "hidden")
         .map((el) => ({
@@ -344,10 +396,10 @@ async function harvest(page: Page): Promise<Harvest> {
     }));
 
     const controls = [
-      ...document.querySelectorAll("button, [role=button], input[type=submit], input[type=button]"),
-    ]
-      .map(names)
-      .filter((c) => c.label.length > 0 || c.alt.length > 0);
+      ...document.querySelectorAll(
+        "button, [role=button], input[type=submit], input[type=button], input[type=image]",
+      ),
+    ].map(names);
 
     return {
       title: document.title,
@@ -357,6 +409,19 @@ async function harvest(page: Page): Promise<Harvest> {
       links: document.querySelectorAll("a[href]").length,
     };
   });
+
+  return {
+    title: raw.title,
+    anchors: raw.anchors.map((a) => ({ href: a.href, ...namesFrom(a.raw) })),
+    forms: raw.forms.map(({ submitRaw, ...f }) => ({
+      ...f,
+      submitLabels: submitRaw.flatMap((r) => namesFrom(r).names),
+    })),
+    // A control with no name at all has nothing to show or match; one named only by a
+    // title or an icon's alt is kept now, where it used to be dropped as nameless.
+    controls: raw.controls.map(namesFrom).filter((c) => c.names.length > 0),
+    links: raw.links,
+  };
 }
 
 /**
@@ -376,7 +441,7 @@ export function partitionLinks(
   for (const a of anchors) {
     const n = normalizeUrl(a.href, base);
     if (!n || !inScope(n, cfg)) continue;
-    if (isDeniedUrl(n, cfg) || isDenied(a.label, cfg) || isDenied(a.alt, cfg)) {
+    if (isDeniedUrl(n, cfg) || deniedByName(a, cfg)) {
       deniedLinks.push(n);
       continue;
     }
@@ -432,6 +497,12 @@ async function visit(
     await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => {});
     finalUrl = page.url();
   } catch (err) {
+    // The limiter refusing is not a page that failed to load: nothing was requested.
+    // Recording it as one wrote an ok:false line for every job left in the queue.
+    if (err instanceof PolitenessError) {
+      await page.close().catch(() => {});
+      throw err;
+    }
     pageErrors.push(`navigation: ${err instanceof Error ? err.message : String(err)}`);
   }
   const loadMs = Date.now() - started;
@@ -461,10 +532,9 @@ async function visit(
   // `buttons` is never a candidate - the deny-list stops being advice and starts being
   // a property of the data.
   //
-  // BOTH candidate names are checked: aria-label and visible text. Checking only one let
-  // a "Delete" button with aria-label="Confirm" through.
-  const isDeniedControl = (c: ControlInfo): boolean =>
-    isDenied(c.label, cfg) || isDenied(c.alt, cfg);
+  // EVERY candidate name is checked: aria-label, visible text, title, aria-labelledby and
+  // icon alt text. Checking only one let a "Delete" button with aria-label="Confirm" through.
+  const isDeniedControl = (c: ControlInfo): boolean => deniedByName(c, cfg);
   const display = (c: ControlInfo): string => c.label || c.alt;
   const safeButtons = [
     ...new Set(info.controls.filter((c) => !isDeniedControl(c)).map(display)),
@@ -584,6 +654,12 @@ export function createFrontier(cfg: QaConfig, done: Set<string>): Frontier {
   const enqueue = (url: string, depth: number): void => {
     const key = dedupKey(url);
     if (queued.has(key) || depth > cfg.maxDepth) return;
+    // So does the scope check. It was left to every caller, and baseUrl itself was enqueued
+    // with none - this door is only "the single door" if it enforces CLAUDE.md rule 1 too.
+    if (!isAllowedUrl(url, cfg)) {
+      queued.add(key); // record it once, like a denied URL
+      return;
+    }
     // The deny check lives HERE, not only on harvested links. baseUrl, the auth landing
     // and sitemap <loc> entries never pass through visit()'s link filter, so a sitemap
     // listing /account/delete used to be queued and GET-ted by the crawler itself.
@@ -639,6 +715,81 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
       timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
     }),
   ]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/** How a crawl's worker pool ended, beyond simply running out of work. */
+export interface PoolOutcome {
+  timedOut: boolean;
+  /** The limiter's refusal, if one stopped the pool. Not a page failure: nothing was sent. */
+  refused: PolitenessError | null;
+}
+
+/**
+ * Run `concurrency` workers over a shared queue until it drains, a cap is hit, or the
+ * politeness limiter refuses a request.
+ *
+ * Lifted out of main() so the refusal decision can be tested without a browser. A
+ * PolitenessError used to be caught as one more navigation failure, so when the budget
+ * was spent or the breaker opened the crawl kept draining its queue, wrote an ok:false
+ * record for every remaining job and exited 0 - and `npm run qa` carried on against a
+ * target that had asked it to stop. Now the first refusal stops every worker.
+ */
+export async function runPool<J>(opts: {
+  queue: J[];
+  concurrency: number;
+  deadline: number;
+  /** Checked before taking each job: a page cap reached, or a fatal error elsewhere. */
+  stop: () => boolean;
+  handle: (job: J, worker: number) => Promise<void>;
+  /** Where a crashed job is reported, and how it is named there. */
+  log?: (line: string) => void;
+  name?: (job: J) => string;
+}): Promise<PoolOutcome> {
+  const log = opts.log ?? ((line: string) => console.error(line));
+  const name = opts.name ?? ((job: J) => String(job));
+  let active = 0;
+  let timedOut = false;
+  let refused: PolitenessError | null = null;
+
+  const worker = async (id: number): Promise<void> => {
+    for (;;) {
+      if (refused || opts.stop()) return;
+      // Wall-clock cap. Without one, a page that hangs past every per-step timeout keeps
+      // `active` above zero and every other worker polls until the process is killed.
+      if (Date.now() > opts.deadline) {
+        timedOut = true;
+        return;
+      }
+
+      const job = opts.queue.shift();
+      if (job === undefined) {
+        // An empty queue is not the end of the crawl while peers are still visiting -
+        // they are about to enqueue what they discover. Exiting here is what collapses
+        // a concurrency of N to 1, because all but one worker leave on the first tick.
+        if (active === 0) return;
+        await new Promise((r) => setTimeout(r, 50));
+        continue;
+      }
+
+      active++;
+      try {
+        await opts.handle(job, id);
+      } catch (err) {
+        if (err instanceof PolitenessError) {
+          refused ??= err;
+          return;
+        }
+        // visit() handles its own navigation errors; reaching here means the context or
+        // browser broke. Losing one page must not abandon the crawl and orphan chromium.
+        log(`! [w${id}] CRASH ${name(job)}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        active--;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, (_, i) => worker(i + 1)));
+  return { timedOut, refused };
 }
 
 async function main(): Promise<void> {
@@ -754,40 +905,23 @@ async function main(): Promise<void> {
   const records: PageRecord[] = [];
   const started = Date.now();
   const deadline = started + cfg.maxRuntimeMs;
-  let crawled = 0;
-  let active = 0;
   /** Set when a write fails. A crawl that cannot persist its output must not continue. */
   let fatal: Error | null = null;
   /** Dedup keys already written this run - a belt-and-braces guard against double records. */
   const recorded = new Set<string>();
   let timedOut = false;
+  let refused: PolitenessError | null = null;
 
-  const worker = async (id: number): Promise<void> => {
-    for (;;) {
-      if (fatal) return;
-      // Wall-clock cap. Without one, a page that hangs past every per-step timeout keeps
-      // `active` above zero and every other worker polls until the process is killed.
-      if (Date.now() > deadline) {
-        timedOut = true;
-        return;
-      }
+  try {
+    ({ timedOut, refused } = await runPool({
+      queue,
+      concurrency: cfg.concurrency,
+      deadline,
       // Budget check BEFORE taking the job, so a job is never shifted then discarded.
       // done.size is included: maxPages is a cap on the inventory, not on one invocation.
-      if (done.size + recorded.size >= cfg.maxPages) return;
-
-      const job = queue.shift();
-      if (!job) {
-        // An empty queue is not the end of the crawl while peers are still visiting -
-        // they are about to enqueue what they discover. Exiting here is what collapses
-        // a concurrency of N to 1, because all but one worker leave on the first tick.
-        if (active === 0) return;
-        await new Promise((r) => setTimeout(r, 50));
-        continue;
-      }
-
-      active++;
-      crawled++;
-      try {
+      stop: () => fatal !== null || done.size + recorded.size >= cfg.maxPages,
+      name: (job) => job.url,
+      handle: async (job, id) => {
         const { record, discovered } = await visit(context, job.url, job.depth, cfg, mode);
 
         // Enqueue FIRST. This used to sit after the append, inside the same try, so a
@@ -817,20 +951,8 @@ async function main(): Promise<void> {
         console.log(
           `${flag} [w${id}] ${String(record.status ?? "ERR").padEnd(3)} ${String(record.loadMs).padStart(5)}ms  ${record.url}`,
         );
-      } catch (err) {
-        // visit() handles its own navigation errors; reaching here means the context or
-        // browser broke. Losing one page must not abandon the crawl and orphan chromium.
-        console.error(`! [w${id}] CRASH ${job.url}: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        active--;
-      }
-    }
-  };
-
-  try {
-    await Promise.all(
-      Array.from({ length: Math.max(1, cfg.concurrency) }, (_, i) => worker(i + 1)),
-    );
+      },
+    }));
     // Let in-flight capture handlers finish reading their bodies BEFORE the context goes
     // away. response.body() throws once the context is closed, and those failures were
     // swallowed silently - exchanges just went missing from the export.
@@ -878,8 +1000,20 @@ async function main(): Promise<void> {
       (load.waitedMs ? `, ${(load.waitedMs / 1000).toFixed(1)}s spent waiting politely` : ""),
   );
 
-  const status = { ...verdict, load };
+  const status = {
+    ...verdict,
+    load,
+    ...(refused === null ? {} : { refused: { kind: refused.kind, message: refused.message } }),
+  };
   writeFileSync(resolve(OUT, `crawl-status.${mode}.json`), `${JSON.stringify(status, null, 2)}\n`);
+
+  if (refused !== null) {
+    console.log(`\n${"!".repeat(60)}`);
+    console.log(`CRAWL STOPPED BY THE POLITENESS LIMITER (${refused.kind}):`);
+    console.log(`  ${refused.message}`);
+    console.log(`  ${queue.length} queued page(s) were not visited. The inventory is INCOMPLETE.`);
+    console.log(`${"!".repeat(60)}`);
+  }
 
   if (load.throttledOrigins.length > 0) {
     console.log(`\n${"!".repeat(60)}`);
@@ -936,7 +1070,14 @@ async function main(): Promise<void> {
   // Released here and also on exit/SIGINT, so a crash cannot leave a lock that blocks
   // every future run.
   releaseLock();
+
+  // Exit 3, distinct from a crash (1): the target asked us to stop. qa.ts reads it and
+  // skips the remaining network steps instead of carrying on against a throttling site.
+  if (refused !== null) process.exitCode = CRAWL_REFUSED_EXIT;
 }
+
+/** The crawl's exit code when the politeness limiter stopped it. Read by qa.ts. */
+export const CRAWL_REFUSED_EXIT = 3;
 
 // Only crawl when this file is the entry point. Without the guard, importing
 // normalizeUrl/templateOf from a test or another script starts a real crawl.

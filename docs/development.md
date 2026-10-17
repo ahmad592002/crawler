@@ -96,9 +96,13 @@ await submitAndWait(page, safeClick(page, /Retrieve password/i), "/forgot_passwo
 will get a clear error telling you to narrow it.
 
 `src/lint-specs.test.ts` enforces both rules. A bare `page.goto("/literal-path")` is
-tolerated, because it cannot leave the origin and a reviewer can see where it goes. A
-`goto` on anything computed (a link from an email, a URL read off another page) fails the
-lint: use `safeGoto`, or `safeGotoResponse` when you need the status code.
+tolerated because a reviewer can see where it goes, and the fixture's `page.goto` (and every
+`harden()`ed page from `openAs` / `openAnonymous`) runs the same scope and deny check as
+`safeGoto` before navigating. The lint still rejects a literal that is protocol-relative
+(`"//host/x"` is another origin, not a path) or that `isDeniedUrl` refuses, and any
+`goto?.(` / `goto.bind` / `.call` / `.apply`. A `goto` on anything computed (a link from an
+email, a URL read off another page) fails the lint: use `safeGoto`, or `safeGotoResponse`
+when you need the status code.
 
 ### Known-bug tests
 

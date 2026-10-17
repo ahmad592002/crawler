@@ -108,15 +108,30 @@ skip — which is exactly the kind of failure nobody notices.
 
 ## Exit codes and the findings gate
 
-`npm run qa` exits non-zero when:
+`npm run qa` runs seven steps — `crawl (anon)`, `playwright test`, `crawl (auth)`,
+`authorization scan`, `pre-deploy scan`, `coverage`, `report` (see
+[architecture.md](architecture.md#the-pipeline) for which are soft). It exits non-zero when:
 
-- a non-soft step failed (`crawl (anon)`, `report`), **or**
-- `output/findings.jsonl` records a `critical` or `high` finding.
+- **any** step failed. A *soft* step's failure does not stop the pipeline — the steps
+  after it still run and the report is still built — but it still fails the run. A
+  non-soft step (`crawl (anon)`, `report`) stops the pipeline immediately, **or**
+- `output/findings.jsonl`, `output/deploy-findings.jsonl` or `output/authz-findings.jsonl`
+  records a `critical` or `high` finding.
 
-**In CI that second condition cannot fire, and you should know why.** `output/` is
-gitignored, so a fresh checkout has no findings file; findings come from the Phase 5
-exploration session, which is interactive and is not part of this pipeline. The runner
-prints this explicitly rather than a reassuring `0`:
+The pre-deploy and authorization scans run inside the pipeline, so their critical/high
+findings **do** gate a CI run. Both also exit 2 when their scan was inconclusive (target
+unreachable, or the politeness limiter refused), which fails the run rather than passing
+it as clean. A crawl stopped by the limiter exits 3; the remaining network steps are then
+skipped, and coverage and the report still run.
+
+`requestDelayMs`, `maxRequests` and the rate-limit breaker are **per step**: each step is
+its own process with its own budget and breaker, so one `npm run qa` can spend up to
+`maxRequests` per network step. They do not apply to the Playwright suite at all.
+
+**`findings.jsonl` cannot gate CI, and you should know why.** `output/` is gitignored, so a
+fresh checkout has no such file; those findings come from the Phase 5 exploration session,
+which is interactive and is not part of this pipeline. The runner prints this explicitly
+rather than a reassuring `0`:
 
 ```
 critical/high findings: n/a - no output/findings.jsonl in this workspace.
@@ -125,8 +140,8 @@ critical/high findings: n/a - no output/findings.jsonl in this workspace.
 If you want a nightly run to gate on findings, restore that file into the workspace first
 — cache it between runs, or keep a reviewed copy somewhere the job can fetch.
 
-Test failures alone are **soft**: the pipeline continues so the report is still built. A
-failing suite is when the report matters most.
+Test failures are **soft**: the pipeline continues so the report is still built, because a
+failing suite is when the report matters most. The run still exits non-zero.
 
 ## Timeouts
 

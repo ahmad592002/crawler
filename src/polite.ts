@@ -246,8 +246,13 @@ export function createPoliteClient(cfg: PoliteConfig, deps: Deps = {}): PoliteCl
       const origin = originOf(url);
       guard(origin);
       await waitTurn(origin);
-      // Counted: a browser navigation costs the target exactly as much as a fetch, and a
-      // budget that ignored them would be describing a fraction of the real load.
+      // Again after the wait, exactly as fetch() does. Checked only before it, N concurrent
+      // workers all passed while `sent` was still under the budget, and a navigation queued
+      // behind the spacing went out after the breaker had opened.
+      guard(origin);
+      // Counted in the same synchronous section as the check: a browser navigation costs
+      // the target exactly as much as a fetch, and a budget that ignored them would be
+      // describing a fraction of the real load.
       stats.sent++;
     },
 

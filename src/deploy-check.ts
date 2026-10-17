@@ -15,13 +15,13 @@
  * Findings go to output/deploy-findings.jsonl in the same shape as findings.jsonl, so the
  * report and the qa gate pick them up without special-casing.
  */
-import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig, isAllowedUrl, isDeniedUrl, ROOT, type QaConfig, OUT } from "./config.js";
 import { slugify as contentSlug, type PageRecord } from "./crawl.js";
 import { readHistory, type HttpExchange } from "./http-history.js";
 import { fingerprint, overlap, SAME_PAGE, looksLikeHtml, htmlIsWrongFor } from "./fingerprint.js";
-import { polite } from "./polite.js";
+import { polite, PolitenessError } from "./polite.js";
 import { detectCaptcha, unprotectedSensitiveForm } from "./captcha.js";
 
 const FINDINGS = resolve(OUT, "deploy-findings.jsonl");
@@ -41,6 +41,40 @@ export interface DeployFinding {
 }
 
 // ---------------------------------------------------------------- path probes
+
+/**
+ * What the scan actually managed to ask the target.
+ *
+ * Without it a probe that timed out, a refused connection and a limiter refusal were all
+ * indistinguishable from a 404, so a run against a target that was down printed "No
+ * critical or high findings." and exited 0. Same rule as authz-check.ts: silence must never
+ * be mistaken for safety.
+ */
+export interface ProbeLedger {
+  /** Probe requests sent (or tried). */
+  attempted: number;
+  /** Of those, how many threw - timeout, refused connection, DNS. */
+  failed: number;
+  /** Neither nonsense-path baseline request could be completed. */
+  baselineUnreachable: boolean;
+  /** Content pages that could not be fetched. Reported, not part of the verdict. */
+  contentUnreachable: number;
+  /** The politeness limiter's message, if it refused a request. */
+  refused: string | null;
+}
+
+export function newProbeLedger(): ProbeLedger {
+  return { attempted: 0, failed: 0, baselineUnreachable: false, contentUnreachable: 0, refused: null };
+}
+
+/** More than this share of probes failing means the scan proved nothing. As authz-check. */
+const MAX_FAIL_RATE = 0.25;
+
+export function deployVerdict(l: ProbeLedger, blocking: number): "inconclusive" | "findings" | "clean" {
+  const failRate = l.attempted === 0 ? 1 : l.failed / l.attempted;
+  if (l.refused !== null || failRate > MAX_FAIL_RATE) return "inconclusive";
+  return blocking > 0 ? "findings" : "clean";
+}
 
 interface Probe {
   path: string;
@@ -112,6 +146,7 @@ const PROBES: Probe[] = [
 async function catchAllBaseline(
   base: string,
   timeoutMs: number,
+  ledger: ProbeLedger,
 ): Promise<{ print: Set<string>; length: number } | null> {
   const bodies: string[] = [];
   for (const tag of ["alpha", "beta"]) {
@@ -128,8 +163,13 @@ async function catchAllBaseline(
         // everything, so the guard is genuinely not needed. Stop and say so.
         if (res.status !== 200) return null;
         body = await res.text();
-      } catch {
-        if (attempt === 2) return null;
+      } catch (err) {
+        // A refusal is "stop", not a flaky moment to retry through.
+        if (err instanceof PolitenessError) throw err;
+        if (attempt === 2) {
+          ledger.baselineUnreachable = true;
+          return null;
+        }
       }
     }
     if (body === null) return null;
@@ -142,10 +182,21 @@ async function catchAllBaseline(
   return { print: fingerprint(a), length: a.length };
 }
 
-async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFinding[]> {
+async function runProbes(
+  cfg: QaConfig,
+  timeoutMs: number,
+  ledger: ProbeLedger = newProbeLedger(),
+): Promise<DeployFinding[]> {
   const base = cfg.baseUrl.replace(/\/$/, "");
   const found: DeployFinding[] = [];
-  const baseline = await catchAllBaseline(base, timeoutMs);
+  let baseline: Awaited<ReturnType<typeof catchAllBaseline>>;
+  try {
+    baseline = await catchAllBaseline(base, timeoutMs, ledger);
+  } catch (err) {
+    if (!(err instanceof PolitenessError)) throw err;
+    ledger.refused = err.message;
+    return found;
+  }
 
   if (baseline) {
     console.log(
@@ -170,6 +221,7 @@ async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFindin
     // Never request something the deny-list considers destructive.
     if (isDeniedUrl(url, cfg)) continue;
 
+    ledger.attempted++;
     try {
       const res = await polite().fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
       if (res.status !== 200) continue;
@@ -204,8 +256,17 @@ async function runProbes(cfg: QaConfig, timeoutMs: number): Promise<DeployFindin
         evidence: body.slice(0, 200).replace(/\s+/g, " ").trim(),
         source: "probe",
       });
-    } catch {
-      // Timeouts and connection errors are not findings.
+    } catch (err) {
+      // The limiter refusing is the end of the scan, and it must say so: swallowing it here
+      // spun through every remaining probe and reported the silence as clean.
+      if (err instanceof PolitenessError) {
+        ledger.attempted--;
+        ledger.refused = err.message;
+        break;
+      }
+      // Timeouts and connection errors are not findings - but they are not a clean answer
+      // either. Counted, so a scan that reached nothing cannot pass as one that found nothing.
+      ledger.failed++;
     }
   }
   return found;
@@ -579,6 +640,7 @@ async function collectHtml(
   history: HttpExchange[],
   cfg: QaConfig,
   timeoutMs: number,
+  ledger: ProbeLedger = newProbeLedger(),
 ): Promise<Map<string, string>> {
   const html = new Map<string, string>();
 
@@ -645,7 +707,8 @@ async function collectHtml(
   let fetched = 0;
   let protectedPages = 0;
   let redirects = 0;
-  for (const url of targets) {
+  let refusedPages = 0;
+  for (const [i, url] of targets.entries()) {
     try {
       // Not followed: the redirect target was never scope- or deny-checked, and a page
       // that 302s to /logout would have had this scan sign the session out.
@@ -666,14 +729,21 @@ async function collectHtml(
       // route - /basic_auth answers 401 by design. Reporting those as "unreachable"
       // reads as breakage and buries the count that actually matters.
       if (res.status === 401 || res.status === 403) protectedPages++;
-    } catch {
+    } catch (err) {
+      // The limiter said stop: every page from here on is unscanned, not unreachable.
+      if (err instanceof PolitenessError) {
+        ledger.refused ??= err.message;
+        refusedPages = targets.length - i;
+        break;
+      }
       /* genuinely unreachable - timed out or refused */
     }
   }
 
   // Say what was actually examined. A count that does not add up is the signal that the
   // scan is narrower than the crawl, and it should be visible without reading the code.
-  const unreachable = targets.length - fetched - protectedPages - redirects;
+  const unreachable = targets.length - fetched - protectedPages - redirects - refusedPages;
+  ledger.contentUnreachable = unreachable;
   const parts = [`${fromCapture} from capture`];
   if (fromDisk > 0) parts.push(`${fromDisk} reused from the crawl`);
   parts.push(`${fetched} fetched`);
@@ -681,6 +751,7 @@ async function collectHtml(
   if (redirects > 0) parts.push(`${redirects} redirect(s), not followed`);
   if (gone > 0) parts.push(`${gone} already 404/410 in the crawl`);
   if (unreachable > 0) parts.push(`${unreachable} unreachable`);
+  if (refusedPages > 0) parts.push(`${refusedPages} NOT SCANNED - refused by the limiter`);
   if (overBound > 0) parts.push(`${overBound} NOT SCANNED - over the ${MAX_CONTENT_FETCH} cap`);
   console.log(`  content: ${html.size} document(s) (${parts.join(", ")})`);
 
@@ -697,8 +768,11 @@ async function main(): Promise<void> {
   console.log(`Pre-deploy scan of ${cfg.baseUrl}\n`);
 
   console.log(`probing ${PROBES.length} well-known path(s) ...`);
-  const probeFindings = await runProbes(cfg, timeoutMs);
-  console.log(`  ${probeFindings.length} exposed\n`);
+  const ledger = newProbeLedger();
+  const probeFindings = await runProbes(cfg, timeoutMs, ledger);
+  console.log(`  ${probeFindings.length} exposed`);
+  if (ledger.failed > 0) console.log(`  ${ledger.failed} of ${ledger.attempted} probe(s) could not be completed`);
+  console.log("");
 
   const pages = readPages();
   // readHistory() with no argument merges every capture that exists and returns [] when
@@ -711,7 +785,7 @@ async function main(): Promise<void> {
   }
 
   console.log("scanning page content for leftovers ...");
-  const html = await collectHtml(pages, history, cfg, timeoutMs);
+  const html = await collectHtml(pages, history, cfg, timeoutMs, ledger);
   const contentFindings = scanContent(pages, html);
   console.log(`  ${contentFindings.length} finding(s)\n`);
 
@@ -747,6 +821,40 @@ async function main(): Promise<void> {
   console.log(`\nwrote ${FINDINGS}`);
 
   const blocking = bySeverity.critical + bySeverity.high;
+  const verdict = deployVerdict(ledger, blocking);
+
+  // The verdict goes to disk before any exit path, as authz-status.json does: an
+  // inconclusive run that leaves no trace looks identical to a clean one downstream.
+  writeFileSync(
+    resolve(OUT, "deploy-status.json"),
+    `${JSON.stringify(
+      {
+        ranAt: new Date().toISOString(),
+        probesAttempted: ledger.attempted,
+        probesFailed: ledger.failed,
+        baselineUnreachable: ledger.baselineUnreachable,
+        contentUnreachable: ledger.contentUnreachable,
+        ...(ledger.refused === null ? {} : { refused: ledger.refused }),
+        blocking,
+        verdict,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  if (verdict === "inconclusive") {
+    console.error(
+      ledger.refused !== null
+        ? `\nSCAN INCONCLUSIVE - stopped by the politeness limiter.\n  ${ledger.refused}`
+        : `\nSCAN INCONCLUSIVE - ${ledger.failed} of ${ledger.attempted} probe(s) could not be ` +
+            `completed${ledger.baselineUnreachable ? " and the catch-all baseline was unobtainable" : ""}.\n` +
+            `  The target was unreachable or timing out.`,
+    );
+    if (blocking > 0) console.error(`  ${blocking} critical/high finding(s) were still recorded.`);
+    console.error("  This is NOT a clean result. Fix connectivity and re-run.");
+    process.exit(2);
+  }
   if (blocking > 0) {
     console.error(`\nNOT READY TO DEPLOY: ${blocking} critical/high finding(s).`);
     process.exit(1);

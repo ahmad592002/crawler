@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { resolve } from "node:path";
-import { ROOT, loadConfig } from "./config.js";
+import { ROOT, loadConfig, isDeniedUrl } from "./config.js";
 import { stripComments } from "./coverage.js";
 
 const TESTS = resolve(ROOT, "tests");
@@ -320,10 +320,32 @@ test("the exemptions still hold when nothing else is on the line", () => {
  * URL read back off another page, is precisely the input safeGoto's scope and deny checks
  * exist for, and personas.setup.ts was following verification links with a bare goto.
  */
-const BARE_GOTO = /\.goto\s*\(\s*(?!["']\/[^"'`$]*["']\s*[,)])|\[\s*["'`]goto["'`]\s*\]/;
+const BARE_GOTO = new RegExp(
+  [
+    // A call on anything but a literal same-origin path. "//host" is NOT a path: it is a
+    // protocol-relative URL to another origin, and the old exemption waved it through.
+    String.raw`\.goto\s*\(\s*(?!["']\/(?!\/)[^"'\`$]*["']\s*[,)])`,
+    String.raw`\[\s*["'\`]goto["'\`]\s*\]`,
+    // Indirect calls the literal check never sees: optional call, bind/call/apply.
+    String.raw`\.goto\s*\?\.`,
+    String.raw`\.goto\s*\.\s*(?:bind|call|apply)\b`,
+  ].join("|"),
+);
+
+/** A literal path argument, so it can be deny-checked like the URL it becomes. */
+const LITERAL_GOTO = /\.goto\s*\(\s*["'](\/[^"'`$]*)["']/g;
+
+const lintCfg = loadConfig();
 
 function isBareGoto(line: string): boolean {
-  return BARE_GOTO.test(line);
+  if (BARE_GOTO.test(line)) return true;
+  // A literal is visible to a reviewer, but "/users/7/delete" is visibly destructive and
+  // the lint is the reviewer that always reads every line.
+  const cfg = lintCfg;
+  for (const m of line.matchAll(LITERAL_GOTO)) {
+    if (isDeniedUrl(new URL(m[1] ?? "/", cfg.baseUrl).toString(), cfg)) return true;
+  }
+  return false;
 }
 
 test("no spec navigates to a computed URL with a bare goto", () => {
@@ -363,6 +385,52 @@ test("the goto rule flags computed targets and allows literal relative paths", (
   ]) {
     assert.equal(isBareGoto(line), false, `false positive: ${line}`);
   }
+});
+
+// C-31: the literal-path exemption trusted anything that started with "/", which includes a
+// protocol-relative "//evil.test/x" and a literal "/users/7/delete". And the fixture's own
+// page.goto wrapper checked nothing, so whatever the lint let through went straight out.
+test("C-31: the goto rule flags protocol-relative, destructive and indirect literal gotos", () => {
+  for (const line of [
+    `await page.goto("//evil.test/x");`,
+    `await page.goto('//evil.test/x', { waitUntil: "commit" });`,
+    `await page.goto("/users/7/delete");`,
+    `await page.goto("/account/close");`,
+    `const go = page.goto.bind(page);`,
+    `await page.goto?.("/login");`,
+    `await page.goto.call(page, "/login");`,
+  ]) {
+    assert.equal(isBareGoto(line), true, `should be flagged: ${line}`);
+  }
+  // The exemption itself still holds for a plain, harmless literal.
+  assert.equal(isBareGoto(`await page.goto("/settings");`), false);
+});
+
+test("C-31: the fixture's own page.goto refuses an out-of-scope or destructive URL", async () => {
+  const { harden, guardNavigation } = await import("../tests/fixtures.js");
+  const base = loadConfig().baseUrl;
+
+  assert.throws(() => guardNavigation("/users/7/delete"), /denyList/);
+  assert.throws(() => guardNavigation("//evil.test/x"), /outside allowedOrigins/);
+  assert.throws(() => guardNavigation("https://evil.test/"), /outside allowedOrigins/);
+  assert.equal(guardNavigation("/settings"), new URL("/settings", base).toString());
+
+  // Through the wrapper a spec actually calls: harden() is what the fixture page and every
+  // openAs/openAnonymous page get, so a literal page.goto is checked like safeGoto.
+  const visited: string[] = [];
+  const fakePage = {
+    route: async () => {},
+    goto: async (url: string) => {
+      visited.push(url);
+      return null;
+    },
+  } as unknown as Parameters<typeof harden>[0];
+  await harden(fakePage);
+  await assert.rejects(async () => fakePage.goto("/users/7/delete"), /denyList/);
+  await assert.rejects(async () => fakePage.goto("//evil.test/x"), /outside allowedOrigins/);
+  assert.deepEqual(visited, [], "a refused URL must not be navigated at all");
+  await fakePage.goto("/settings");
+  assert.deepEqual(visited, [new URL("/settings", base).toString()]);
 });
 
 test("safeGoto refuses an off-origin or destructive link before navigating", async () => {

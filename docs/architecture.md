@@ -172,16 +172,35 @@ attempt rather than the earlier failure.
 | 1 | `crawl (anon)` | no | A failure here means there is nothing to report on. |
 | 2 | `playwright test` | yes | Runs **before** the auth crawl: its `setup` project is what writes `output/auth/state.json`. |
 | 3 | `crawl (auth)` | yes | Skipped cleanly when there is no saved session. |
-| 4 | `report` | no | Always reached, even when step 2 failed — a failing suite is when you most want the report. |
+| 4 | `authorization scan` | yes | `src/authz-check.ts`. Skipped when there is no `pages.auth.jsonl`. Exits 2 when inconclusive. |
+| 5 | `pre-deploy scan` | yes | `src/deploy-check.ts`. Exits 2 when inconclusive (target unreachable, or the limiter refused). |
+| 6 | `coverage` | yes | Offline: reads what the earlier steps wrote. |
+| 7 | `report` | no | Always reached unless a non-soft step failed — a failing suite is when you most want the report. |
+
+**Soft means only "the pipeline continues".** A soft step that fails still makes the final
+exit code non-zero; it just does not stop the steps after it. A non-soft step that fails
+stops the pipeline at once, with that step's exit code.
+
+If a crawl exits **3** — stopped by the politeness limiter (budget spent or breaker open) —
+the remaining network steps (2-5) are skipped rather than run against a throttling target,
+coverage and the report still run, and the final exit code is non-zero.
 
 Step 2 and 3 used to be the other way round. A fresh checkout has no `state.json`, so the
 authenticated crawl reported a clean skip on every single run and CI never crawled a
 logged-in page. Ordering is the fix; the `when` guard alone was not enough.
 
-**Exit code:** non-zero if a non-soft step failed, or if `findings.jsonl` records a
-critical/high finding. Note that `output/` is gitignored, so on a fresh CI checkout there
-is no findings file and the gate has nothing to read — the runner says so explicitly
-rather than printing a reassuring `0`.
+**Exit code:** non-zero if any step failed (soft or not), or if `findings.jsonl`,
+`deploy-findings.jsonl` or `authz-findings.jsonl` records a critical/high finding. The
+last two are written by steps 4 and 5 inside the pipeline, so they **do** gate a CI run.
+`findings.jsonl` comes from the interactive Phase 5 session; `output/` is gitignored, so on
+a fresh CI checkout that file is absent — the runner says so explicitly rather than
+printing a reassuring `0`.
+
+**Politeness is per step.** `requestDelayMs`, `maxRequests` and the rate-limit breaker
+live in one process, and `npm run qa` runs each step as its own process: each step gets its
+own budget and its own breaker, and the run as a whole can spend up to `maxRequests` per
+network step. They do not apply to the Playwright suite (step 2) at all — its navigations
+do not pass through the polite client.
 
 ## Why it is written the way it is
 

@@ -45,12 +45,42 @@ export const test = base.extend({
     // waits for every last image and third-party script; on a slow or partly-broken page
     // that reads as a navigation timeout even though the DOM was ready in a second.
     // Assertions (expect...toBeVisible) provide the real waiting, so nothing is lost.
-    const goto = page.goto.bind(page);
-    page.goto = (url, options) => goto(url, { waitUntil: "domcontentloaded", ...options });
+    guardGoto(page);
 
     await use(page);
   },
 });
+
+/**
+ * Resolve a navigation target and refuse it unless it is in scope and not destructive.
+ * Returns the absolute URL that was approved; that exact string is what gets navigated.
+ *
+ * Resolved against baseUrl even when it looks absolute: "//evil.test/x" is a
+ * protocol-relative URL to another origin, not a path.
+ */
+export function guardNavigation(url: string): string {
+  const absolute = new URL(url, cfg.baseUrl).toString();
+  if (!isAllowedUrl(absolute, cfg)) {
+    throw new Error(`Refusing to navigate to ${absolute}: outside allowedOrigins.`);
+  }
+  if (isDeniedUrl(absolute, cfg)) {
+    throw new Error(`Refusing to navigate to ${absolute}: it matches qa.config.json denyList.`);
+  }
+  return absolute;
+}
+
+/**
+ * Wrap page.goto: domcontentloaded by default, and the same scope and deny check as
+ * safeGoto. The wrapper used to check nothing, so a literal page.goto("/users/7/delete") -
+ * which the lint tolerated as "a literal path" - went straight out. Every goto on a fixture
+ * or harden()ed page now passes through guardNavigation, literal or not.
+ */
+function guardGoto(page: Page): void {
+  const goto = page.goto.bind(page);
+  // Thrown inside an async function so a refusal is a rejected promise, as goto's own
+  // failures are, rather than a synchronous throw a caller's .catch() would miss.
+  page.goto = async (url, options) => goto(guardNavigation(url), { waitUntil: "domcontentloaded", ...options });
+}
 
 export { expect };
 
@@ -71,8 +101,7 @@ export async function harden(page: Page): Promise<void> {
     );
   }
   await page.route(/\.(woff2?|ttf|otf|eot|mp4|webm|mp3|avi|mov)(\?|$)/i, (route) => route.abort());
-  const goto = page.goto.bind(page);
-  page.goto = (url, options) => goto(url, { waitUntil: "domcontentloaded", ...options });
+  guardGoto(page);
 }
 
 export interface UserSession {
@@ -355,13 +384,7 @@ export async function safeGoto(
   url: string,
   options?: { waitUntil?: "commit" | "domcontentloaded" | "load" | "networkidle" },
 ): Promise<void> {
-  const absolute = url.startsWith("http") ? url : new URL(url, cfg.baseUrl).toString();
-  if (!isAllowedUrl(absolute, cfg)) {
-    throw new Error(`Refusing to navigate to ${absolute}: outside allowedOrigins.`);
-  }
-  if (isDeniedUrl(absolute, cfg)) {
-    throw new Error(`Refusing to navigate to ${absolute}: it matches qa.config.json denyList.`);
-  }
+  const absolute = guardNavigation(url);
   // The ABSOLUTE url, which was computed above to run the guard and was then thrown away
   // while the relative one was passed on. That made every safeGoto depend on the context
   // having inherited `baseURL` - true for the fixture's own page, not guaranteed for a
@@ -383,13 +406,7 @@ export async function safeGotoResponse(
   url: string,
   options?: { waitUntil?: "commit" | "domcontentloaded" | "load" | "networkidle" },
 ): Promise<Response | null> {
-  const absolute = url.startsWith("http") ? url : new URL(url, cfg.baseUrl).toString();
-  if (!isAllowedUrl(absolute, cfg)) {
-    throw new Error(`Refusing to navigate to ${absolute}: outside allowedOrigins.`);
-  }
-  if (isDeniedUrl(absolute, cfg)) {
-    throw new Error(`Refusing to navigate to ${absolute}: it matches qa.config.json denyList.`);
-  }
+  const absolute = guardNavigation(url);
   return page.goto(absolute, { waitUntil: options?.waitUntil ?? "domcontentloaded" });
 }
 

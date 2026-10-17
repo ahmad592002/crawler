@@ -20,6 +20,10 @@ import {
   collectHtml,
   CONTENT_PATTERNS,
   MAX_CONTENT_FETCH,
+  runProbes,
+  newProbeLedger,
+  deployVerdict,
+  type ProbeLedger,
 } from "./deploy-check.js";
 import type { PageRecord } from "./crawl.js";
 import type { HttpExchange } from "./http-history.js";
@@ -434,4 +438,54 @@ test("a page with no saved HTML is still fetched", async () => {
   const { html, requested } = await collectWithStub([page("https://target.test/never-saved")], []);
   assert.deepEqual(requested, ["https://target.test/never-saved"]);
   assert.equal(html.size, 1);
+});
+
+// ------------------------------------------------- C-29: a scan that reached nothing
+
+/**
+ * The probe loop's bare `catch {}` treated a refused connection exactly like a 404, and so
+ * did the limiter's refusal. A run against a target that was down - or whose budget was
+ * already spent - printed "No critical or high findings." and exited 0: the clean verdict
+ * from a scan that never asked the site a single question.
+ */
+async function probeWith(fetchImpl: typeof fetch, budget = 0): Promise<ProbeLedger> {
+  setPoliteClient(createPoliteClient({ ...DEFAULT_POLITE, delayMs: 0, budget }, { fetchImpl }));
+  try {
+    const ledger = newProbeLedger();
+    const found = await runProbes(CFG, 5_000, ledger);
+    assert.deepEqual(found, [], "nothing answered, so nothing can have been found");
+    return ledger;
+  } finally {
+    resetPoliteClient();
+  }
+}
+
+test("C-29: probes that never reach the target make the scan inconclusive, not clean", async () => {
+  const ledger = await probeWith((async () => {
+    throw new TypeError("fetch failed");
+  }) as unknown as typeof fetch);
+  assert.ok(ledger.attempted > 0, "the probes were attempted");
+  assert.equal(ledger.failed, ledger.attempted, "every attempt is counted as failed");
+  assert.equal(ledger.baselineUnreachable, true);
+  assert.equal(deployVerdict(ledger, 0), "inconclusive");
+});
+
+test("C-29: a limiter refusal surfaces as refused, not as zero findings", async () => {
+  // Budget 1: the first baseline request spends it, everything after is refused.
+  const ledger = await probeWith(
+    (async () => ({ status: 404, headers: new Headers(), text: async () => "" })) as unknown as typeof fetch,
+    1,
+  );
+  assert.match(ledger.refused ?? "", /budget/);
+  assert.equal(deployVerdict(ledger, 0), "inconclusive");
+});
+
+test("C-29: a scan whose probes were answered can still be clean", async () => {
+  const ledger = await probeWith(
+    (async () => ({ status: 404, headers: new Headers(), text: async () => "" })) as unknown as typeof fetch,
+  );
+  assert.equal(ledger.failed, 0);
+  assert.equal(ledger.refused, null);
+  assert.equal(deployVerdict(ledger, 0), "clean");
+  assert.equal(deployVerdict(ledger, 2), "findings");
 });

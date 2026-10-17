@@ -144,7 +144,9 @@ function renderWithSuite(
   }
 
   try {
-    return buildReport(out);
+    // The specs directory is the checkout's tests/ by default (C-47), not OUT/../tests, so
+    // this fixture's own tests/ has to be named.
+    return buildReport(out, join(box, "tests"));
   } finally {
     rmSync(box, { recursive: true, force: true });
   }
@@ -374,5 +376,52 @@ test("a screenshot path cannot embed a file from outside output/screenshots", ()
     assert.ok(html.includes(Buffer.from("PNG-OK").toString("base64")), "a real screenshot is still embedded");
   } finally {
     rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+// ------------------------------------------------- C-47: where the specs actually live
+
+/**
+ * The provenance check looked for specs at OUT/../tests. Under QA_OUT=output/shop that is
+ * output/tests, which does not exist, so the stale-results warning silently disappeared
+ * for every non-default target. And it read tests/ flat, so tests/generated/ - where
+ * Phase 6 writes its specs - was never looked at.
+ */
+test("C-47: under a nested output directory the repo's specs are still checked", () => {
+  const box = mkdtempSync(join(tmpdir(), "qa-nested-"));
+  const out = join(box, "output", "shop"); // what QA_OUT=output/shop produces
+  mkdirSync(join(out, "screenshots"), { recursive: true });
+  writeFileSync(join(out, "pages.jsonl"), MINIMAL_PAGE + "\n");
+  writeFileSync(join(out, "pw-results.json"), resultsFor(["auth.spec.ts"]));
+  // Older than every spec in the repository.
+  utimesSync(join(out, "pw-results.json"), 1, 1);
+  try {
+    const html = buildReport(out);
+    assert.match(html, /changed after this test run/);
+    assert.match(html, /auth\.spec\.ts/);
+  } finally {
+    rmSync(box, { recursive: true, force: true });
+  }
+});
+
+test("C-47: a generated spec newer than the results is called out", () => {
+  const box = mkdtempSync(join(tmpdir(), "qa-gen-"));
+  const out = join(box, "output");
+  mkdirSync(join(out, "screenshots"), { recursive: true });
+  mkdirSync(join(box, "tests", "generated"), { recursive: true });
+  writeFileSync(join(box, "tests", "a.spec.ts"), "// ran");
+  writeFileSync(join(out, "pages.jsonl"), MINIMAL_PAGE + "\n");
+  writeFileSync(join(out, "pw-results.json"), resultsFor(["a.spec.ts"]));
+  const old = (Date.now() - 86_400_000) / 1000;
+  utimesSync(join(out, "pw-results.json"), old, old);
+  utimesSync(join(box, "tests", "a.spec.ts"), old - 60, old - 60);
+  writeFileSync(join(box, "tests", "generated", "found-01.spec.ts"), "// written after the run");
+  try {
+    const html = buildReport(out, join(box, "tests"));
+    assert.match(html, /changed after this test run/);
+    assert.match(html, /generated\/found-01\.spec\.ts/);
+    assert.match(html, /not in this run at all/, "a generated spec absent from the results is named too");
+  } finally {
+    rmSync(box, { recursive: true, force: true });
   }
 });

@@ -47,8 +47,10 @@ const ConfigSchema = z.object({
    *
    * requestDelayMs is the minimum gap between two requests to the SAME origin, and it
    * is the setting that prevents the problem rather than reacting to it. maxRequests is
-   * a hard ceiling for one run, counting browser navigations as well as fetches - a page
-   * load costs the target the same either way.
+   * a hard ceiling for one step (one process), counting browser navigations as well as
+   * fetches - a page load costs the target the same either way. `npm run qa` runs each step
+   * as its own process, so the budget and the breaker reset per step; none of these apply
+   * to the Playwright suite, whose navigations do not go through the polite client.
    */
   /**
    * Save each crawled page's HTML so nothing has to fetch it twice.
@@ -285,9 +287,15 @@ export function isDeniedUrl(url: string, cfg: QaConfig): boolean {
   } catch {
     // Unparseable; match the raw string, which is no looser than before.
   }
-  for (const pattern of cfg.denyUrlExceptions ?? []) {
+  // And the exception must describe the WHOLE path. Unanchored, '/add_remove_elements/?$'
+  // matched the tail of '/account/delete/add_remove_elements/' and exempted the delete in
+  // front of it. Anchoring here makes every existing config safe without editing it. A ';'
+  // (matrix parameter) or a '.ext/' segment (PATH_INFO, '/delete.php/...') means the server
+  // may route on a prefix the pattern never looked at, so such a path is never exempted.
+  const exemptable = !/;|\.[a-z0-9]+\//i.test(exceptionPath);
+  for (const pattern of exemptable ? (cfg.denyUrlExceptions ?? []) : []) {
     try {
-      if (new RegExp(pattern).test(exceptionPath)) return false;
+      if (new RegExp(`^(?:${pattern})$`).test(exceptionPath)) return false;
     } catch {
       // A bad regex in config must not silently disable the guard for everything else.
     }

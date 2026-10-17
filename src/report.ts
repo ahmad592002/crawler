@@ -24,6 +24,14 @@ const DEFAULT_OUT = CONFIG_OUT;
  */
 let OUT = DEFAULT_OUT;
 
+/**
+ * Where the specs live: the checkout's tests/, whatever OUT is. It used to be OUT/../tests,
+ * which is output/tests under QA_OUT=output/shop - absent, so the stale-results warning
+ * silently vanished for every non-default target. Parameterised like OUT, for the tests.
+ */
+const DEFAULT_TESTS_DIR = resolve(ROOT, "tests");
+let TESTS_DIR = DEFAULT_TESTS_DIR;
+
 type Severity = "critical" | "high" | "medium" | "low";
 
 interface Finding {
@@ -240,13 +248,29 @@ const SEVERITY_ORDER: Severity[] = ["critical", "high", "medium", "low"];
  * Either way the published report describes a different suite from the repository, which
  * is worse than describing none. So it is checked and said out loud.
  */
+/**
+ * Every .spec.ts under the tests directory, at any depth, as a forward-slash relative path.
+ *
+ * Flat, it never saw tests/generated/ - which is where Phase 6 writes its specs, so the
+ * files most likely to have changed since the last run were the ones it ignored.
+ */
+function specsUnder(dir: string, rel = ""): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(resolve(dir, rel), { withFileTypes: true })) {
+    const path = rel ? `${rel}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...specsUnder(dir, path));
+    else if (/\.spec\.ts$/.test(entry.name)) out.push(path);
+  }
+  return out;
+}
+
 function resultsProvenance(file: string): string[] {
   const warnings: string[] = [];
-  const testsDir = resolve(OUT, "..", "tests");
+  const testsDir = TESTS_DIR;
   if (!existsSync(testsDir)) return warnings;
 
   const resultsMtime = statSync(file).mtimeMs;
-  const specFiles = readdirSync(testsDir).filter((f) => /\.spec\.ts$/.test(f));
+  const specFiles = specsUnder(testsDir);
 
   const newer = specFiles.filter((f) => statSync(resolve(testsDir, f)).mtimeMs > resultsMtime);
   if (newer.length > 0) {
@@ -295,10 +319,11 @@ function testResults(): {
   };
   collect(root.suites);
 
-  const testsDir = resolve(OUT, "..", "tests");
+  const testsDir = TESTS_DIR;
   if (existsSync(testsDir)) {
-    const onDisk = readdirSync(testsDir).filter((f) => /\.spec\.ts$/.test(f));
-    const absent = onDisk.filter((f) => !filesInResults.has(f));
+    const onDisk = specsUnder(testsDir);
+    // Results name a file by its basename here (see collect), so compare on that.
+    const absent = onDisk.filter((f) => !filesInResults.has(f.replace(/^.*\//, "")));
     if (absent.length > 0) {
       warnings.push(
         `${absent.length} spec file(s) are not in this run at all: ${absent.sort().join(", ")}`,
@@ -335,8 +360,9 @@ function testResults(): {
 }
 
 /** Build report.html. Exported so a test can render without spawning a process. */
-export function buildReport(outDir: string = DEFAULT_OUT): string {
+export function buildReport(outDir: string = DEFAULT_OUT, testsDir: string = DEFAULT_TESTS_DIR): string {
   OUT = outDir;
+  TESTS_DIR = testsDir;
   const cfg = loadConfig();
   // Keep the LAST record per URL. A crawl that retried a page after a failed first
   // attempt leaves both lines in the file; showing the stale failure would misreport it.
@@ -761,6 +787,7 @@ ${slowest.map((p) => `<tr><td>${esc(p.loadMs)}ms</td><td class="url">${esc(p.url
   // Reset, so one render cannot leave the module pointed at a temp directory that the
   // next caller then writes into.
   OUT = DEFAULT_OUT;
+  TESTS_DIR = DEFAULT_TESTS_DIR;
   return html;
 }
 

@@ -84,7 +84,7 @@ export const FIELDS: FieldMeta[] = [
   { key: "requestDelayMs", label: "Request delay (ms)", group: "Politeness & rate limits", type: "number", min: 0, default: 250,
     help: "Minimum gap between two requests to the SAME origin. This is the setting that PREVENTS rate limiting rather than reacting to it. Raise it for a fragile target; 0 removes spacing (only for a site you own)." },
   { key: "maxRequests", label: "Request budget", group: "Politeness & rate limits", type: "number", min: 0, default: 2000,
-    help: "Hard ceiling on total requests for one run, counting page loads as well as fetches. 0 means no cap - use only against your own infrastructure." },
+    help: "Hard ceiling on total requests for one step (crawl, pre-deploy scan, ...), counting page loads as well as fetches. Each step of npm run qa is its own process with its own budget, and the Playwright suite is not counted at all. 0 means no cap - use only against your own infrastructure." },
   { key: "rateLimitBreakAfter", label: "Break after N rate-limits", group: "Politeness & rate limits", type: "number", min: 1, default: 5,
     help: "After this many 429/503 answers in a row from one origin, the agent stops touching it - because everything after that point is the throttling, not the site." },
   { key: "rateLimitRetries", label: "Rate-limit retries", group: "Politeness & rate limits", type: "number", min: 0, default: 3,

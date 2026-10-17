@@ -15,7 +15,7 @@
  * more than the minute this takes, because it sends you looking for a regression that
  * is not there.
  */
-import { loadConfig, isAllowedUrl, type QaConfig } from "./config.js";
+import { loadConfig, isAllowedUrl, isDeniedUrl, type QaConfig } from "./config.js";
 import { polite } from "./polite.js";
 
 interface Probe {
@@ -44,10 +44,10 @@ export function subresources(html: string, base: string, limit = 10): string[] {
   return out.slice(0, limit);
 }
 
-async function probe(url: string, timeoutMs: number): Promise<Probe> {
+async function probe(url: string, timeoutMs: number, redirect: RequestRedirect = "follow"): Promise<Probe> {
   const started = Date.now();
   try {
-    const res = await polite().fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const res = await polite().fetch(url, { redirect, signal: AbortSignal.timeout(timeoutMs) });
     // Drain the body: a server can answer with headers and then stall, which is exactly
     // the shape that makes a browser hang while a HEAD-only check looks healthy.
     await res.text();
@@ -114,12 +114,18 @@ export async function checkHealth(cfg: QaConfig): Promise<Health> {
   let assets: string[] = [];
   try {
     const res = await polite().fetch(base, { signal: AbortSignal.timeout(timeoutMs) });
-    assets = subresources(await res.text(), base).filter((u) => isAllowedUrl(u, cfg));
+    // Deny-checked like every other requester: a <script src="/session/logout.js"> is as
+    // much a GET as a followed link, and the scope check alone let it through.
+    assets = subresources(await res.text(), base).filter(
+      (u) => isAllowedUrl(u, cfg) && !isDeniedUrl(u, cfg),
+    );
   } catch {
     /* already proved the document is reachable; carry on with none */
   }
 
-  const probes = [doc, ...(await Promise.all(assets.map((u) => probe(u, timeoutMs))))];
+  // Not followed: an asset's redirect target was never scope- or deny-checked. A 3xx is
+  // an answer, and judgeHealth counts it as reachable.
+  const probes = [doc, ...(await Promise.all(assets.map((u) => probe(u, timeoutMs, "manual"))))];
   return judgeHealth(probes);
 }
 

@@ -8,7 +8,25 @@
  * dialog silently vacuous. Every dialog test below installs an explicit handler and
  * asserts on what it captured.
  */
-import { test, expect, safeClick, safeClickLink, safeRightClick } from "./fixtures.js";
+import {
+  test,
+  expect,
+  safeClick,
+  safeClickLink,
+  safeRightClick,
+  safeGoto,
+  guardNavigation,
+} from "./fixtures.js";
+
+/** True when the fixture's navigation guard would refuse this URL. */
+function navigationRefused(url: string): boolean {
+  try {
+    guardNavigation(url);
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 test.describe("hovers", () => {
   test("hovering a figure reveals its caption and profile link", async ({ page }) => {
@@ -35,7 +53,12 @@ test.describe("hovers", () => {
 
 test.describe("drag and drop", () => {
   test("dragging A onto B swaps the two columns", async ({ page }) => {
-    await page.goto("/drag_and_drop");
+    // "drop" is one of isDeniedUrl's built-in destructive route verbs, so the crawler
+    // already withholds this page and the guarded goto refuses it. A bare goto used to walk
+    // past that. Skipped as destructive (CLAUDE.md) until someone reviews the page and adds
+    // a denyUrlExceptions entry for it - at which point this runs again on its own.
+    test.skip(navigationRefused("/drag_and_drop"), "skipped: destructive - /drag_and_drop matches the deny rules");
+    await safeGoto(page, "/drag_and_drop");
     const a = page.locator("#column-a");
     const b = page.locator("#column-b");
 
