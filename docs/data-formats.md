@@ -20,6 +20,8 @@ output/
 ├── pw-report/                         Playwright HTML report (contains traces)
 ├── screenshots/                       full-page JPEGs
 ├── auth/state.json                    saved session — TREAT AS A SECRET
+├── summary.md                         full run summary + nuclei command plan (npm run summary)
+├── nuclei/<category>.txt               scoped target lists the nuclei commands point at
 └── report.html                        the deliverable
 ```
 

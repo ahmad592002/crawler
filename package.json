@@ -19,7 +19,11 @@
     "preflight": "tsx src/preflight.ts",
     "test:fast": "playwright test tests/auth.spec.ts tests/forms.spec.ts tests/structure.spec.ts",
     "profile": "tsx src/techprofile.ts",
-    "configui": "tsx src/configpage.ts"
+    "configui": "tsx src/configpage.ts",
+    "summary": "tsx src/summary.ts",
+    "nuclei:plan": "tsx src/summary.ts",
+    "panel": "tsx src/control-panel.ts",
+    "diagnose": "tsx src/diagnose.ts"
   },
   "type": "module",
   "private": true,

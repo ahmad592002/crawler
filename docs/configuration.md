@@ -3,6 +3,12 @@
 Three files. `qa.config.json` is the one you edit; `.env` holds secrets; `.mcp.json`
 registers the MCP servers Claude uses.
 
+> You don't have to edit `qa.config.json` by hand. `npm run panel` opens a local control
+> panel (`http://127.0.0.1:7777`) with a field for every variable below, Save writes the
+> file after validating it, and buttons run the crawler and the rest. Tick **Watch the
+> browser window** (or set `QA_HEADFUL=1`) to see Chromium drive the crawl, and the live
+> table fills with each page as it is inventoried.
+
 ## qa.config.json
 
 Validated by a Zod schema in `src/config.ts` at load time. **An unknown or malformed key

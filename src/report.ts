@@ -10,6 +10,8 @@ import { resolve, sep } from "node:path";
 import { ROOT, loadConfig, OUT as CONFIG_OUT } from "./config.js";
 import type { PageRecord } from "./crawl.js";
 import type { TechProfile } from "./techprofile.js";
+import { buildRecommendations } from "./nuclei.js";
+import { materializeNuclei } from "./summary.js";
 
 const DEFAULT_OUT = CONFIG_OUT;
 
@@ -398,6 +400,10 @@ export function buildReport(outDir: string = DEFAULT_OUT, testsDir: string = DEF
     sev,
     items: findings.filter((f) => f.severity === sev),
   }));
+  // Nuclei command recommendations, built from the inventory + tech profile. Read-only here
+  // (write=false): the `npm run summary` script is what writes the output/nuclei/*.txt lists.
+  const nuclei = materializeNuclei(buildRecommendations(pages, tech, cfg), OUT, false);
+
   const slowest = [...pages].sort((a, b) => b.loadMs - a.loadMs).slice(0, 10);
   const broken = pages.filter((p) => (p.status ?? 0) >= 400 || p.pageErrors.length > 0);
   const avgMs = pages.length ? Math.round(pages.reduce((n, p) => n + p.loadMs, 0) / pages.length) : 0;
@@ -552,6 +558,48 @@ export function buildReport(outDir: string = DEFAULT_OUT, testsDir: string = DEF
     })
     .join("");
 
+  // Executive summary: the one-screen answer. A single verdict line, the severity split,
+  // coverage, and the security posture the profiler saw - all from data already read above.
+  const sevCount = (s: Severity): number => bySeverity.find((b) => b.sev === s)?.items.length ?? 0;
+  const blocking = sevCount("critical") + sevCount("high");
+  const missingHeaders = (tech?.securityHeaders ?? []).filter((h) => !h.present).map((h) => h.name);
+  const insecureCookies = (tech?.cookies ?? []).filter((c) => !c.secure || !c.httpOnly).map((c) => c.name);
+  const covChip = (label: string, b: { covered?: number; total?: number } | undefined): string => {
+    const total = b?.total ?? 0;
+    const pct = total ? Math.round(((b?.covered ?? 0) / total) * 100) : 0;
+    return `<span class="chip">${esc(label)} ${b?.covered ?? 0}/${total} (${pct}%)</span>`;
+  };
+  const verdictClass = blocking ? "bad" : findings.length ? "warn" : "ok";
+  const verdictText = blocking
+    ? `${blocking} blocking finding${blocking === 1 ? "" : "s"} (critical/high)`
+    : findings.length
+      ? `${findings.length} finding${findings.length === 1 ? "" : "s"}, none blocking`
+      : "no findings recorded";
+  const execSummary = `<section class="exec">
+  <div class="verdict ${verdictClass}">${esc(verdictText)}</div>
+  <div class="execgrid">
+    <div><h4>Severity</h4>${SEVERITY_ORDER.map((s) => `<span class="chip sev-${s}">${s} ${sevCount(s)}</span>`).join("")}</div>
+    <div><h4>Coverage</h4>${covChip("templates", coverage?.templates)}${covChip("forms", coverage?.forms)}${covChip("controls", coverage?.controls)}</div>
+    <div><h4>Stack</h4>${[...(tech?.server ?? []), ...(tech?.frameworks ?? [])].slice(0, 5).map((d) => `<span class="chip">${esc(d.name)}</span>`).join("") || '<span class="muted">unknown</span>'}</div>
+    <div><h4>Posture</h4>${missingHeaders.length ? `<span class="chip warn">${missingHeaders.length} header(s) missing</span>` : '<span class="chip ok">headers set</span>'}${insecureCookies.length ? `<span class="chip warn">${insecureCookies.length} cookie(s) insecure</span>` : ""}${nuclei.length ? `<span class="chip">${nuclei.length} nuclei command(s) suggested</span>` : ""}</div>
+  </div>
+</section>`;
+
+  const nucleiSection = nuclei.length
+    ? `<h2>Recommended nuclei commands</h2>
+<p class="muted">Run only against a target you own or are authorized to test. Each command is scoped to <code>allowedOrigins</code> and paced to the crawl's rate. <b>Active</b> scans send crafted payloads — opt in deliberately. Target lists are written by <code>npm run summary</code>.</p>
+${nuclei
+        .map(
+          (r) => `<div class="nrec${r.intrusive ? " active" : ""}">
+  <div class="nhead"><b>${esc(r.title)}</b>${r.intrusive ? '<span class="chip warn">active</span>' : ""}${r.endpoints.length ? `<span class="chip">${r.endpoints.length} endpoint(s)</span>` : ""}</div>
+  <div class="nwhy">${esc(r.why)}</div>
+  <div class="nfix"><b>Fix:</b> ${esc(r.fix)}</div>
+  <pre class="ncmd">${esc(r.command)}</pre>
+</div>`,
+        )
+        .join("")}`
+    : "";
+
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -596,6 +644,21 @@ figcaption .t{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellip
 .badge{font-size:11px;padding:1px 6px;border-radius:5px;background:#8881;border:1px solid var(--line)}
 .badge.ok{color:var(--ok)} .badge.warn{color:var(--warn)} .badge.bad{color:var(--bad)}
 .badge.auth{color:var(--accent)}
+.exec{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:6px 0 22px}
+.exec .verdict{font-size:18px;font-weight:650;margin-bottom:12px}
+.exec .verdict.bad{color:var(--bad)} .exec .verdict.warn{color:var(--warn)} .exec .verdict.ok{color:var(--ok)}
+.execgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+.execgrid h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.chip{display:inline-block;font-size:12px;padding:2px 8px;margin:2px 4px 2px 0;border-radius:999px;background:#8881;border:1px solid var(--line)}
+.chip.warn{color:var(--warn);border-color:var(--warn)} .chip.ok{color:var(--ok);border-color:var(--ok)}
+.chip.sev-critical{color:var(--bad)} .chip.sev-high{color:var(--warn)} .chip.sev-medium{color:var(--accent)}
+.muted{color:var(--muted)}
+.nrec{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:12px 14px;margin:10px 0}
+.nrec.active{border-left-color:var(--warn)}
+.nhead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.nwhy{font-size:13px;color:var(--muted);margin-bottom:4px}
+.nfix{font-size:13px;margin-bottom:8px}
+.ncmd{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-x:auto;font-size:12.5px;margin:0;white-space:pre-wrap;word-break:break-all}
 .techgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
 .techcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
 .techcard h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
@@ -627,7 +690,9 @@ padding:20px;color:var(--muted)}
   ${stat("tests passed", tests.total ? `${tests.passed}/${tests.total}` : "-", tests.failed ? "bad" : "ok")}
 </div>
 
+${execSummary}
 ${siteAnalysis}
+${nucleiSection}
 <h2>Findings</h2>
 ${
   findings.length

@@ -52,7 +52,10 @@ see [docs/email.md](docs/email.md) if your site rejects disposable domains.
 | `npm run predeploy` | Pre-deploy hygiene scan — what you forgot to remove |
 | `npm run authz` | Cross-user authorization scan — IDOR and signed-out access |
 | `npm run coverage` | What the crawl found that nothing tests |
-| `npm run report` | Build `output/report.html` |
+| `npm run panel` | **Control panel** at `http://127.0.0.1:7777` — edit every setting, run the crawler from buttons, watch pages stream in live (and optionally the browser window), and see the MCP tools Claude uses |
+| `npm run summary` | Write `output/summary.md` + a scoped nuclei command plan per endpoint category |
+| `npm run diagnose` | Read a finished run and print the verdict + ranked retry actions (the core of `/autorun`) |
+| `npm run report` | Build `output/report.html` (now opens with an executive summary and the nuclei plan) |
 | `npm run export:burp` | Rebuild `output/http-history.xml` from the capture |
 | `npm run qa` | Everything, in order |
 | `npm run typecheck` | `tsc --noEmit` |

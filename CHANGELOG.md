@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased — Fixed — improvement round 3
+
+- **Control panel Host/CSRF interlock (`src/control-panel.ts`).** Every request must now name
+  this loopback origin (`Host: 127.0.0.1:PORT` or `localhost:PORT`) or it is refused with 403,
+  and the side-effecting routes (`/save`, `/run`, `/stop`) additionally refuse any `Origin`/
+  `Referer` that is present and not the panel's own origin. A web page the user is merely
+  browsing (including a DNS-rebinding attacker) can no longer start crawls or rewrite
+  `qa.config.json`. The panel's own `fetch()`/`EventSource` still work. New exported
+  `isLocalRequest(headers, port, { checkOrigin })`, pinned in `src/control-panel.extra.test.ts`.
+- **Control panel no longer leaves secrets in `os.tmpdir()` (`src/control-panel.ts`).**
+  `saveConfig` validated the merged config — login/persona passwords included — by writing it
+  to a world-readable `os.tmpdir()` file it never deleted. It now writes a fixed-name,
+  `0o600` copy under `OUT` (project-local, gitignored) and always removes it in a `finally`.
+- **nuclei baseUrl is shell-escaped and scope-checked (`src/nuclei.ts`).** `buildRecommendations`
+  interpolated `baseUrl` into the whole-site `-u '…'` commands with a bare single-quote wrap and
+  no scope check. A quote in the value could break out of the argument. The base is now wrapped
+  as one POSIX-escaped shell argument (`' → '\''`) and a `-u` command is emitted only when the
+  base is a real, in-scope http(s) URL; otherwise a clear note replaces the command.
+
+## Unreleased — autopilot: run, read, retry
+
+- **`src/diagnose.ts` (`npm run diagnose`).** Reads a finished run — crawl-status, the page
+  inventory, the status files — and returns the verdict, whether the run is complete, and
+  ranked, concrete retry actions (slow down when rate-limited, raise a budget at the ceiling,
+  set up auth on a login-wall, widen include / seed sitemap on too-few-pages, run the
+  scanners once the inventory is usable). Every action is a safe nudge or a next step; none
+  ever widens `allowedOrigins` or the deny-list. `src/diagnose.test.ts` pins the rankings and
+  that guarantee.
+- **`qa-autopilot` agent + `/autorun` command.** Points the pipeline at one authorized target
+  and loops run → `diagnose` → apply ONE safe change → re-run, until the run is `settled`, the
+  attempt budget is spent, or two attempts make no progress, then writes a run report. It only
+  makes safe config nudges, never invents credentials, and refuses an unauthorized target.
+
+## Unreleased — control panel, live view, watch mode
+
+- **Control panel (`npm run panel`).** A local page at `http://127.0.0.1:7777`: every config
+  variable as a labelled field (from `config-meta.ts`), **Save** writes `qa.config.json` after
+  validating it against the real schema (a bad value is refused with a field-named message and
+  nothing is written), and buttons run the crawler and the other steps with their output
+  streaming live. Bound to `127.0.0.1`; only the fixed set of npm scripts can be started;
+  passwords are never shown or edited. `src/control-panel.test.ts` covers the save gate, the
+  run allow-list, and that no password field is rendered.
+- **Watch the crawler.** `QA_HEADFUL=1` (or the panel's "Watch the browser window" toggle)
+  launches the crawl with a visible Chromium and a small slow-mo. Default stays headless, so
+  CI and the normal run are unchanged.
+- **Live crawl view.** The panel tails `output/pages*.jsonl` and shows each page as it is
+  inventoried — status, load time, forms, buttons, denied controls, URL — with errors flagged.
+- **MCP tools panel.** Lists the `playwright` and `email` MCP servers from `.mcp.json` and
+  their tools, so you can see what Claude drives in the exploration phase (the crawler and
+  scanners use Playwright and HTTP directly, not MCP).
+
+## Unreleased — run summary and nuclei plan
+
+- **Full run summary (`npm run summary` → `output/summary.md`).** One place that reads every
+  `output/` file and reports, in order: findings by severity, coverage, which scans actually
+  ran and their verdicts, the target's security posture, and what was skipped as destructive.
+  The same data drives a new executive-summary panel at the top of `output/report.html`.
+- **Nuclei command recommendations.** Built from the inventory and tech profile, never run.
+  Crawled endpoints are sorted into categories (auth, input forms, upload, API, plus
+  whole-site baseline, missing headers and cookie flags), and each gets the best-fit
+  template set, severity and a command — scoped to `allowedOrigins`, paced to the crawler's
+  rate (`-rate-limit`), with active/fuzzing scans flagged so they are opt-in. Target lists
+  are written to `output/nuclei/<category>.txt`. Shown in `summary.md` and the HTML report.
+  `src/nuclei.test.ts` pins the scope guarantee: an off-origin or deny-listed URL can never
+  reach a target list or a command.
+
 ## Unreleased — adversarial audit remediation
 
 An adversarial review of the whole codebase. Each item below is a defect that was

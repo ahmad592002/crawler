@@ -69,6 +69,9 @@ const steps: Step[] = [
   },
   { name: "pre-deploy scan", argv: ["tsx", "src/deploy-check.ts"], soft: true, network: true },
   { name: "coverage", argv: ["tsx", "src/coverage.ts"], soft: true },
+  // Full run summary + nuclei command plan. Soft: a summary that cannot build must not
+  // stop the report, which is the real deliverable.
+  { name: "summary", argv: ["tsx", "src/summary.ts"], soft: true },
   { name: "report", argv: ["tsx", "src/report.ts"] },
 ];
 
