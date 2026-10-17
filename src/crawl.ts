@@ -830,7 +830,14 @@ async function main(): Promise<void> {
   const done = previousUrls(outFile);
   if (done.size) console.log(`Resuming: ${done.size} page(s) already in ${outFile.split(/[\\/]/).pop()}`);
 
-  const browser: Browser = await chromium.launch({ headless: true });
+  // Watch mode: QA_HEADFUL=1 shows the Chromium window so you can see the crawl happen, with
+  // a small slowMo so it is followable by eye. Default stays headless, so CI and the normal
+  // run are unchanged. The crawl is otherwise identical either way.
+  const headful = /^(1|true|yes)$/i.test(process.env.QA_HEADFUL ?? "");
+  const browser: Browser = await chromium.launch(
+    headful ? { headless: false, slowMo: 250 } : { headless: true },
+  );
+  if (headful) console.log("  watch mode: a Chromium window will open (QA_HEADFUL set)");
   const context = await browser.newContext({
     viewport: { width: 1366, height: 768 },
     ...(mode === "auth" ? { storageState: STATE } : {}),
