@@ -50,6 +50,24 @@ qa-improve-check ─┘
 Reports go to `output/improve/round-<N>/` (git-ignored). The filter is the most important
 step: a finding goes nowhere unless the filter has re-checked it against the code.
 
+## Autopilot: run, read, retry
+
+`qa-autopilot` (`.claude/agents/qa-autopilot.md`, driven by `/autorun`) points the pipeline at
+one authorized target and loops until the run is as good as it will get:
+
+```
+preflight → crawl → npm run diagnose → apply ONE safe change → re-run → … → summary + report
+```
+
+`src/diagnose.ts` (`npm run diagnose`) is the deterministic core: it reads crawl-status, the
+inventory and the status files and returns the verdict, whether the run is complete, and
+ranked retry actions (slow down, raise a budget, set up auth, widen include, run the scanners,
+…). The agent applies the top action, one per attempt, and stops when diagnose reports
+`settled`, the attempt budget is spent, or two attempts make no progress. It only ever makes
+safe config nudges — it never widens `allowedOrigins` or the deny-list, never invents
+credentials, and never scans an unauthorized target. `src/diagnose.test.ts` pins both the
+rankings and that no suggested action touches a safety guard.
+
 ## Rules every agent follows
 
 `CLAUDE.md` applies to every agent. Three extra rules exist only because there are
