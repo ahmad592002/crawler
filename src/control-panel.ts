@@ -16,7 +16,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, statSync, mkdirSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, statSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ROOT, OUT, CONFIG_PATH, loadConfig } from "./config.js";
 import { FIELDS, GROUPS, type FieldMeta } from "./config-meta.js";
@@ -135,143 +135,246 @@ export function page(): string {
   const buttons = Object.entries(TASKS)
     .map(([id, t]) => `<button class="run${t.danger ? " danger" : ""}" data-task="${esc(id)}" title="${esc(t.note)}">${esc(t.label)}</button>`)
     .join("");
+  const NAV = [
+    ["dashboard", "Dashboard", "◱"],
+    ["settings", "Settings", "⚙"],
+    ["run", "Run", "▶"],
+    ["live", "Live crawl", "≡"],
+    ["results", "Results", "✓"],
+    ["mcp", "MCP tools", "⚭"],
+  ];
+  const nav = NAV.map(([id, label, icon]) => `<a class="navlink" href="#${id}" data-view="${id}"><span class="ic">${icon}</span>${esc(label)}</a>`).join("");
+  const mcp = mcpCatalog()
+    .map(
+      (s) => `<details class="card mcp"><summary>${esc(s.name)} <span class="n">${s.tools.length} tools</span></summary>
+      <div class="mcpbody"><div class="mcpwhat">${esc(s.what)}</div><div class="mono small muted">${esc(s.command)}</div>
+      ${s.tools.map((t) => `<div class="mcptool"><b>${esc(t.name)}</b> — ${esc(t.what)}</div>`).join("")}</div></details>`,
+    )
+    .join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>QA Agent — control panel</title>
 <style>
-:root{--bg:#0f1115;--panel:#171a21;--ink:#e8eaed;--muted:#9aa1ad;--line:#272b34;--accent:#6ea8fe;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24;--code:#1d2733}
-@media(prefers-color-scheme:light){:root{--bg:#f5f6f8;--panel:#fff;--ink:#16181d;--muted:#5b6472;--line:#e3e6ea;--accent:#2457d6;--ok:#15803d;--bad:#b91c1c;--warn:#b45309;--code:#eef1f5}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-header{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
-header h1{font-size:16px;margin:0}header .target{color:var(--muted);font:12px ui-monospace,monospace;overflow-wrap:anywhere}
-.wrap{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0;min-height:calc(100vh - 58px)}
-@media(max-width:860px){.wrap{grid-template-columns:1fr}}
-.col{padding:18px 20px;min-width:0}.col.left{border-right:1px solid var(--line)}
-h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 12px}
-.group{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;background:var(--panel)}
-.group>summary{cursor:pointer;padding:10px 14px;font-weight:600;list-style:none;display:flex;justify-content:space-between;align-items:center}
+:root{--bg:#0f1115;--panel:#171a21;--panel2:#1d222b;--ink:#e8eaed;--muted:#9aa1ad;--line:#2a303a;--accent:#6ea8fe;--accent-ink:#06101f;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24;--code:#141922;color-scheme:dark}
+@media(prefers-color-scheme:light){:root:not([data-theme=dark]){--bg:#f4f6f9;--panel:#fff;--panel2:#f0f3f7;--ink:#141821;--muted:#5b6472;--line:#e2e6ec;--accent:#2457d6;--accent-ink:#fff;--ok:#15803d;--bad:#b91c1c;--warn:#b45309;--code:#eef1f6;color-scheme:light}}
+:root[data-theme=light]{--bg:#f4f6f9;--panel:#fff;--panel2:#f0f3f7;--ink:#141821;--muted:#5b6472;--line:#e2e6ec;--accent:#2457d6;--accent-ink:#fff;--ok:#15803d;--bad:#b91c1c;--warn:#b45309;--code:#eef1f6;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}.small{font-size:12px}.muted{color:var(--muted)}
+.app{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh}
+/* sidebar */
+aside{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.brand{padding:18px 18px 12px;display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px}
+.brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent)}
+nav{padding:6px 10px;display:flex;flex-direction:column;gap:2px;flex:1}
+.navlink{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;color:var(--muted);text-decoration:none;font-weight:500}
+.navlink .ic{width:18px;text-align:center;opacity:.85}
+.navlink:hover{background:var(--panel2);color:var(--ink)}
+.navlink.on{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
+aside .foot{padding:12px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+/* main */
+main{min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 24px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.topbar h1{font-size:16px;margin:0}.topbar .sp{flex:1}
+.topbar .target{color:var(--muted);max-width:min(48vw,420px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.content{padding:22px 24px 60px;max-width:900px;width:100%}
+.view[hidden]{display:none}
+h2{font-size:18px;margin:0 0 4px}.lede{color:var(--muted);margin:0 0 18px;font-size:13.5px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0;overflow:hidden}
+.tile .v{font-size:22px;font-weight:650;line-height:1.2}.tile .l{font-size:12px;color:var(--muted);margin-top:4px}
+.tile .v.addr{font:500 13px/1.4 ui-monospace,"Cascadia Mono",Consolas,monospace;word-break:break-all}
+.tile .v.ok{color:var(--ok)}.tile .v.bad{color:var(--bad)}.tile .v.warn{color:var(--warn)}
+/* the target is long text, not a stat: let it span the row and wrap */
+#statTiles{grid-template-columns:1fr}
+@media(min-width:620px){#statTiles{grid-template-columns:2fr 1fr 1fr 1fr}}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:9px;padding:9px 14px;font-weight:500}
+button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:default}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn-primary:hover{filter:brightness(1.08)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.runs{display:flex;flex-wrap:wrap;gap:8px}
+button.run.danger{border-color:var(--warn)}
+.switch{display:inline-flex;gap:8px;align-items:center;cursor:pointer;font-size:13px;color:var(--muted)}
+.status{font-size:13px;min-height:18px;color:var(--muted);margin:10px 0}.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}
+/* settings */
+.group{border:1px solid var(--line);border-radius:11px;margin-bottom:12px;background:var(--panel);overflow:hidden}
+.group>summary{cursor:pointer;padding:12px 16px;font-weight:600;list-style:none;display:flex;justify-content:space-between;align-items:center}
+.group>summary::-webkit-details-marker{display:none}
 .group>summary .n{color:var(--muted);font-weight:400;font-size:12px}
 .group[open]>summary{border-bottom:1px solid var(--line)}
-.field{padding:10px 14px;border-bottom:1px solid var(--line)}.field:last-child{border-bottom:0}
+.field{padding:12px 16px;border-bottom:1px solid var(--line)}.field:last-child{border-bottom:0}
 .field label{display:block;font-weight:600;margin-bottom:2px}.field label code{font-weight:400;color:var(--muted);font-size:11px}
-.field .help{color:var(--muted);font-size:12px;margin-bottom:6px}
+.field .help{color:var(--muted);font-size:12px;margin-bottom:7px}
 .field.sensitive{background:color-mix(in srgb,var(--warn) 7%,transparent)}
 .flag{display:inline-block;width:15px;height:15px;line-height:15px;text-align:center;border-radius:50%;background:var(--warn);color:#000;font-size:11px;font-weight:700}
-input[type=text],input[type=number],textarea{width:100%;font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink)}
+input[type=text],input[type=number],textarea{width:100%;font:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
 textarea{font-family:ui-monospace,monospace;resize:vertical}
-.switch{display:inline-flex;gap:8px;align-items:center;cursor:pointer}
-.bar{display:flex;gap:10px;align-items:center;margin:4px 0 16px;flex-wrap:wrap}
-button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 13px}
-button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:default}
-#save{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-.runs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
-button.run.danger{border-color:var(--warn)}
-.status{font-size:13px;min-height:18px;color:var(--muted)}.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}
-#out{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:12px;height:52vh;overflow:auto;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;word-break:break-word}
+.savebar{position:sticky;bottom:0;background:var(--bg);padding:12px 0;display:flex;gap:12px;align-items:center;border-top:1px solid var(--line);margin-top:6px}
+/* run output */
+#out{background:var(--code);border:1px solid var(--line);border-radius:11px;padding:14px;height:46vh;overflow:auto;font:12px/1.55 ui-monospace,monospace;white-space:pre-wrap;word-break:break-word}
+#out:empty::before{content:"Output appears here when you run a step.";color:var(--muted)}
 #out .err{color:var(--bad)}#out .done{color:var(--ok)}#out .meta{color:var(--muted)}
-.links a{color:var(--accent);margin-right:14px;font-size:13px}
-.switch.watch{margin:8px 0 2px;font-size:13px;color:var(--muted)}
-.tablewrap{overflow:auto;max-height:36vh;border:1px solid var(--line);border-radius:10px;margin-top:6px}
-table{width:100%;border-collapse:collapse;font:12px/1.4 ui-monospace,monospace}
-#liveTable th{position:sticky;top:0;background:var(--panel);text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);color:var(--muted);font-weight:600}
-#liveTable td{padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+/* live table */
+.tablewrap{overflow:auto;max-height:62vh;border:1px solid var(--line);border-radius:11px}
+table{width:100%;border-collapse:collapse;font:12px/1.5 ui-monospace,monospace}
+#liveTable th{position:sticky;top:0;background:var(--panel2);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);color:var(--muted);font-weight:600}
+#liveTable td{padding:5px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 #liveTable td.u{white-space:normal;word-break:break-all;color:var(--muted)}
 #liveTable tr.bad td{color:var(--bad)}
 .n{color:var(--muted);font-weight:400;font-size:12px}
-.mcp .mcpbody{padding:10px 14px;border-top:1px solid var(--line)}
-.mcpwhat{font-size:13px;margin-bottom:6px}.mcpcmd{font-size:11px;color:var(--muted);margin-bottom:8px;overflow-wrap:anywhere}
+.mcpbody{padding:12px 16px;border-top:1px solid var(--line)}.mcpwhat{font-size:13px;margin-bottom:6px}
 .mcptool{font-size:12.5px;padding:3px 0}.mcptool b{font-family:ui-monospace,monospace}
+.linklist a{display:inline-block;color:var(--accent);margin:0 16px 8px 0;font-size:13.5px}
+@media(max-width:760px){
+  .app{grid-template-columns:1fr}
+  aside{position:static;height:auto;flex-direction:row;align-items:center;overflow-x:auto}
+  .brand{padding:12px}nav{flex-direction:row;flex:none}.navlink{white-space:nowrap;padding:8px 10px}
+  aside .foot{display:none}.content{padding:18px 16px 60px}
+}
 </style></head><body>
-<header><h1>QA Agent</h1><span class="target" id="target">${esc(cfg.baseUrl ?? "no baseUrl set")}</span></header>
-<div class="wrap">
-  <div class="col left">
-    <h2>Settings</h2>
-    <div class="bar"><button id="save">Save settings</button><span class="status" id="saveStatus"></span></div>
-    <form id="form">${groups}</form>
-    <div class="bar"><button id="save2">Save settings</button></div>
-  </div>
-  <div class="col right">
-    <h2>Run</h2>
-    <div class="runs">${buttons}<button id="stop" disabled>Stop</button></div>
-    <label class="switch watch"><input type="checkbox" id="headful"><span>Watch the browser window while it crawls</span></label>
-    <div class="status" id="runStatus">Idle. Save your settings, then run Preflight or Crawl.</div>
-    <div class="links" style="margin:8px 0 12px">
-      <a href="/open/report" target="_blank">Open report.html</a>
-      <a href="/open/summary" target="_blank">Open summary.md</a>
+<div class="app">
+  <aside>
+    <div class="brand"><span class="dot"></span> QA Agent</div>
+    <nav>${nav}</nav>
+    <div class="foot"><button id="themeBtn" class="small">◐ Theme</button><span class="small muted">local · 127.0.0.1</span></div>
+  </aside>
+  <main>
+    <div class="topbar"><h1 id="viewTitle">Dashboard</h1><span class="sp"></span><span class="target mono small" id="target">${esc(cfg.baseUrl ?? "no baseUrl set")}</span></div>
+    <div class="content">
+
+      <section class="view" id="view-dashboard">
+        <h2>Overview</h2>
+        <p class="lede">Point the agent at an authorized target, run the steps, read the report. Everything runs locally.</p>
+        <div class="card"><h3>This run</h3>
+          <div class="grid" id="statTiles">
+            <div class="tile"><div class="v addr" id="stTarget">—</div><div class="l">target</div></div>
+            <div class="tile"><div class="v" id="stPages">—</div><div class="l">pages inventoried</div></div>
+            <div class="tile"><div class="v" id="stReport">—</div><div class="l">report</div></div>
+            <div class="tile"><div class="v" id="stSummary">—</div><div class="l">summary</div></div>
+          </div>
+        </div>
+        <div class="card"><h3>Quick actions</h3>
+          <div class="runs">
+            <button class="btn-primary" data-go="preflight">Check target</button>
+            <button class="btn-primary" data-go="crawl">Crawl</button>
+            <button data-go="summary">Summary + nuclei</button>
+            <button data-go="report">Build report</button>
+            <button data-nav="results">Open results →</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings" hidden>
+        <h2>Settings</h2>
+        <p class="lede">Every config variable. Save validates it and writes <code>qa.config.json</code> for you — no files to edit.</p>
+        <form id="form">${groups}</form>
+        <div class="savebar"><button id="save" class="btn-primary">Save settings</button><span class="status" id="saveStatus" style="margin:0"></span></div>
+      </section>
+
+      <section class="view" id="view-run" hidden>
+        <h2>Run</h2>
+        <p class="lede">Start a step; its output streams below. One runs at a time.</p>
+        <div class="card"><div class="runs">${buttons}<button id="stop" disabled>Stop</button></div>
+          <label class="switch" style="margin-top:12px"><input type="checkbox" id="headful"> Watch the browser window while it crawls</label>
+          <div class="status" id="runStatus">Idle. Save your settings, then run Check target or Crawl.</div>
+        </div>
+        <div id="out" aria-live="polite"></div>
+      </section>
+
+      <section class="view" id="view-live" hidden>
+        <h2>Live crawl <span class="n" id="liveCount">0 pages</span></h2>
+        <p class="lede">Fills as pages are inventoried while a crawl runs. Red rows are errors or deny-listed controls.</p>
+        <div class="tablewrap"><table id="liveTable"><thead><tr><th>#</th><th>status</th><th>ms</th><th>forms</th><th>btn</th><th>denied</th><th>URL</th></tr></thead><tbody></tbody></table></div>
+      </section>
+
+      <section class="view" id="view-results" hidden>
+        <h2>Results</h2>
+        <p class="lede">Open the artifacts from the latest run.</p>
+        <div class="card"><h3>Open</h3><div class="linklist">
+          <a href="/open/report" target="_blank">report.html →</a>
+          <a href="/open/summary" target="_blank">summary.md →</a>
+        </div><div class="status small">These are built by the <b>Build report</b> and <b>Summary</b> steps on the Run tab.</div></div>
+      </section>
+
+      <section class="view" id="view-mcp" hidden>
+        <h2>MCP tools</h2>
+        <p class="lede">What Claude drives in the exploration phase. The crawler and scanners use Playwright and HTTP directly — not MCP.</p>
+        ${mcp}
+      </section>
+
     </div>
-    <div id="out" aria-live="polite"></div>
-
-    <h2 style="margin-top:22px">Live crawl <span class="n" id="liveCount">0 pages</span></h2>
-    <div class="status" id="liveNote">Fills as pages are inventoried. Rows flagged red are errors or deny-listed controls.</div>
-    <div class="tablewrap"><table id="liveTable"><thead><tr><th>#</th><th>status</th><th>ms</th><th>forms</th><th>btn</th><th>denied</th><th>URL</th></tr></thead><tbody></tbody></table></div>
-
-    <h2 style="margin-top:22px">MCP tools <span class="n">what Claude drives in exploration</span></h2>
-    <div class="status">The crawler and scanners use Playwright and HTTP directly — not MCP. These are the tools Claude reaches for in Phase 5.</div>
-    ${mcpCatalog()
-      .map(
-        (s) => `<details class="group mcp"><summary>${esc(s.name)} <span class="n">${s.tools.length} tools</span></summary>
-      <div class="mcpbody">
-        <div class="mcpwhat">${esc(s.what)}</div>
-        <div class="mcpcmd"><code>${esc(s.command)}</code></div>
-        ${s.tools.map((t) => `<div class="mcptool"><b>${esc(t.name)}</b> — ${esc(t.what)}</div>`).join("")}
-      </div></details>`,
-      )
-      .join("")}
-  </div>
+  </main>
 </div>
 <script>
-const $=s=>document.querySelector(s);
-function collect(){const o={};document.querySelectorAll('[data-key]').forEach(el=>{
-  const k=el.dataset.key,t=el.dataset.type;
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+// --- view routing ---
+const TITLES={dashboard:"Dashboard",settings:"Settings",run:"Run",live:"Live crawl",results:"Results",mcp:"MCP tools"};
+function show(view){
+  if(!TITLES[view])view="dashboard";
+  $$(".view").forEach(s=>s.hidden=(s.id!=="view-"+view));
+  $$(".navlink").forEach(a=>a.classList.toggle("on",a.dataset.view===view));
+  $("#viewTitle").textContent=TITLES[view];
+  if(view==="dashboard")refreshStatus();
+}
+addEventListener("hashchange",()=>show(location.hash.slice(1)));
+$$("[data-nav]").forEach(b=>b.onclick=()=>location.hash=b.dataset.nav);
+// --- theme ---
+(function(){let t;try{t=localStorage.getItem("qa-theme")}catch{} if(t)document.documentElement.dataset.theme=t;
+ $("#themeBtn").onclick=()=>{const cur=document.documentElement.dataset.theme==="light"?"dark":"light";
+   document.documentElement.dataset.theme=cur;try{localStorage.setItem("qa-theme",cur)}catch{}};})();
+// --- settings ---
+function collect(){const o={};$$("[data-key]").forEach(el=>{const k=el.dataset.key,t=el.dataset.type;
   if(t==='boolean')o[k]=el.checked;
   else if(t==='stringList')o[k]=el.value.split('\\n').map(x=>x.trim()).filter(Boolean);
   else if(t==='number'){if(el.value==='')return;o[k]=Number(el.value);}
-  else{if(el.value==='')return;o[k]=el.value;}
-});return o;}
-async function save(){
-  const st=$('#saveStatus');st.textContent='Saving…';st.className='status';
+  else{if(el.value==='')return;o[k]=el.value;}});return o;}
+async function save(){const st=$('#saveStatus');st.textContent='Saving…';st.className='status';
   try{const r=await fetch('/save',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(collect())});
     const j=await r.json();
     if(j.ok){st.textContent='Saved ✓';st.className='status ok';$('#target').textContent=j.baseUrl||'';}
     else{st.textContent='Not saved: '+j.error;st.className='status bad';}
-  }catch(e){st.textContent='Error: '+e.message;st.className='status bad';}
-}
-$('#save').onclick=save;$('#save2').onclick=save;
+  }catch(e){st.textContent='Error: '+e.message;st.className='status bad';}}
+$('#save').onclick=save;
+// --- run ---
 let es=null;
-function setRunning(on){document.querySelectorAll('button.run').forEach(b=>b.disabled=on);$('#stop').disabled=!on;}
+function setRunning(on){$$('button.run,[data-go]').forEach(b=>b.disabled=on);$('#stop').disabled=!on;}
 function line(text,cls){const d=document.createElement('div');if(cls)d.className=cls;d.textContent=text;$('#out').appendChild(d);$('#out').scrollTop=$('#out').scrollHeight;}
-document.querySelectorAll('button.run').forEach(b=>b.onclick=()=>{
-  if(es)es.close();
-  $('#out').innerHTML='';const task=b.dataset.task;
+function startTask(task){
+  if(es)es.close();location.hash="run";$('#out').innerHTML='';
   $('#runStatus').textContent='Running '+task+'…';$('#runStatus').className='status';setRunning(true);
   line('$ npm run '+task,'meta');
-  const hf=$('#headful').checked?'&headful=1':'';
+  const hf=$('#headful')&&$('#headful').checked?'&headful=1':'';
   es=new EventSource('/run?task='+encodeURIComponent(task)+hf);
   es.addEventListener('out',e=>line(e.data));
   es.addEventListener('err',e=>line(e.data,'err'));
   es.addEventListener('done',e=>{const code=JSON.parse(e.data).code;line('— finished, exit '+code,'done');
     $('#runStatus').textContent=code===0?('Done: '+task):(task+' exited '+code);$('#runStatus').className='status '+(code===0?'ok':'bad');
-    setRunning(false);es.close();es=null;});
-  es.onerror=()=>{line('— stream closed','meta');$('#runStatus').className='status bad';setRunning(false);if(es){es.close();es=null;}};
-});
-$('#stop').onclick=()=>{fetch('/stop',{method:'POST'});};
-// Live crawl table: tails output/pages.jsonl and appends a row per page as it lands.
-(function live(){
-  let n=0;const body=$('#liveTable tbody');
-  const ls=new EventSource('/live');
-  ls.addEventListener('page',e=>{
-    const p=JSON.parse(e.data);n++;
-    const denied=(p.deniedButtons||0)+(p.deniedLinks||0);
-    const tr=document.createElement('tr');
-    const bad=p.ok===false||(p.status||0)>=400||p.pageErrors;
-    if(bad)tr.className='bad';
+    setRunning(false);es.close();es=null;refreshStatus();});
+  es.onerror=()=>{line('— stream closed','meta');setRunning(false);if(es){es.close();es=null;}};
+}
+$$('button.run').forEach(b=>b.onclick=()=>startTask(b.dataset.task));
+$$('[data-go]').forEach(b=>b.onclick=()=>startTask(b.dataset.go));
+$('#stop').onclick=()=>fetch('/stop',{method:'POST'});
+// --- dashboard status ---
+async function refreshStatus(){try{const j=await (await fetch('/status')).json();
+  $('#stTarget').textContent=j.baseUrl||'—';
+  $('#stPages').textContent=j.pages||0;
+  const r=$('#stReport');r.textContent=j.report?'ready':'—';r.className='v '+(j.report?'ok':'');
+  const s=$('#stSummary');s.textContent=j.summary?'ready':'—';s.className='v '+(j.summary?'ok':'');
+}catch{}}
+// --- live table ---
+(function(){let n=0;const body=$('#liveTable tbody');const ls=new EventSource('/live');
+  ls.addEventListener('page',e=>{const p=JSON.parse(e.data);n++;
+    const denied=(p.deniedButtons||0)+(p.deniedLinks||0);const tr=document.createElement('tr');
+    if(p.ok===false||(p.status||0)>=400||p.pageErrors)tr.className='bad';
     tr.innerHTML='<td>'+n+'</td><td>'+(p.status==null?'ERR':p.status)+'</td><td>'+(p.loadMs??'')+'</td><td>'+(p.forms||0)+'</td><td>'+(p.buttons||0)+'</td><td>'+denied+'</td>';
     const u=document.createElement('td');u.className='u';u.textContent=p.url||'';tr.appendChild(u);
-    body.appendChild(tr);$('#liveCount').textContent=n+' pages';
-    tr.scrollIntoView({block:'nearest'});
-  });
+    body.appendChild(tr);$('#liveCount').textContent=n+' pages';tr.scrollIntoView({block:'nearest'});});
   ls.addEventListener('reset',()=>{n=0;body.innerHTML='';$('#liveCount').textContent='0 pages';});
-  ls.onerror=()=>{/* keep trying; EventSource auto-reconnects */};
-})();
+  ls.onerror=()=>{};})();
+show(location.hash.slice(1)||"dashboard");
 </script></body></html>`;
 }
 
@@ -506,6 +609,23 @@ function liveStream(res: ServerResponse): void {
   });
 }
 
+/** A small snapshot for the dashboard: current target and whether artifacts exist. */
+export function runStatus(): { baseUrl: string; pages: number; report: boolean; summary: boolean } {
+  let baseUrl = "";
+  try {
+    baseUrl = String(currentConfig().baseUrl ?? "");
+  } catch {
+    /* ignore */
+  }
+  let pages = 0;
+  try {
+    pages = readFileSync(resolve(OUT, "pages.jsonl"), "utf8").split("\n").filter((l) => l.trim()).length;
+  } catch {
+    /* no crawl yet */
+  }
+  return { baseUrl, pages, report: existsSync(resolve(OUT, "report.html")), summary: existsSync(resolve(OUT, "summary.md")) };
+}
+
 const server = createServer(async (req, res) => {
   // Every request must be addressed to this loopback origin. This is the interlock that
   // keeps a page the user is browsing from reaching the panel at all.
@@ -523,6 +643,7 @@ const server = createServer(async (req, res) => {
     return runTask(url.searchParams.get("task") ?? "", url.searchParams.get("headful") === "1", res);
   }
   if (req.method === "GET" && url.pathname === "/live") return liveStream(res);
+  if (req.method === "GET" && url.pathname === "/status") return send(res, 200, "application/json", JSON.stringify(runStatus()));
   if (req.method === "POST" && url.pathname === "/stop") {
     if (!isLocalRequest(req.headers, PORT, { checkOrigin: true })) return send(res, 403, "text/plain", "forbidden");
     if (running && !running.killed) running.kill();
