@@ -33,8 +33,10 @@ writeFileSync(
   }),
 );
 process.env.QA_CONFIG = cfgPath;
+process.env.QA_OUT = dir; // temp validation file lands here, not the real output/
+process.env.QA_ENV = resolve(dir, ".env"); // login secrets write here, not the real .env
 
-const { page, saveConfig, TASK_IDS } = await import("./control-panel.js");
+const { page, saveConfig, saveLogin, loginStatus, TASK_IDS } = await import("./control-panel.js");
 
 test("the page renders a field for every config variable and the run buttons", () => {
   const html = page();
@@ -45,7 +47,7 @@ test("the page renders a field for every config variable and the run buttons", (
 });
 
 test("the run allow-list is exactly the known tasks - nothing arbitrary", () => {
-  assert.deepEqual([...TASK_IDS].sort(), ["coverage", "crawl", "crawl:auth", "preflight", "profile", "qa", "report", "summary"]);
+  assert.deepEqual([...TASK_IDS].sort(), ["auth:setup", "coverage", "crawl", "crawl:auth", "preflight", "profile", "qa", "report", "summary"]);
 });
 
 test("a valid save writes qa.config.json and keeps keys the form never sent", () => {
@@ -71,6 +73,37 @@ test("a wrong-typed value is refused (schema gate), config untouched", () => {
   assert.equal(readFileSync(cfgPath, "utf8"), before);
 });
 
-test("the form never surfaces a password field", () => {
-  assert.ok(!/data-key="password"/.test(page()) && !/type="password"/.test(page()));
+test("the settings config form never carries a credential field", () => {
+  // The password lives only on the Login tab; the config form (data-key fields) has none.
+  assert.ok(!/data-key="password"/.test(page()), "no password among the config fields");
+  assert.ok(!/data-key="login\.password"/.test(page()));
+});
+
+test("login: the password is saved to .env, never to qa.config.json, and never echoed back", () => {
+  const res = saveLogin(JSON.stringify({ username: "alice@example.com", password: "s3cr3t-pw", path: "/signin", successUrl: "/home" }));
+  assert.equal((res as { ok: boolean }).ok, true);
+  // config gets the non-secret descriptors + username, NEVER the password
+  const written = JSON.parse(readFileSync(cfgPath, "utf8"));
+  assert.equal(written.login.path, "/signin");
+  assert.equal(written.login.successUrl, "/home");
+  assert.equal(written.login.username, "alice@example.com");
+  assert.ok(!("password" in written.login), "the password never reaches qa.config.json");
+  assert.ok(!readFileSync(cfgPath, "utf8").includes("s3cr3t-pw"), "no password anywhere in the config file");
+  // it went to .env (the temp QA_ENV)
+  const env = readFileSync(resolve(dir, ".env"), "utf8");
+  assert.match(env, /TEST_PASSWORD=s3cr3t-pw/);
+  assert.match(env, /TEST_USERNAME=alice@example\.com/);
+  // the status never leaks the value
+  const st = loginStatus();
+  assert.equal(st.passwordSet, true);
+  assert.ok(!JSON.stringify(st).includes("s3cr3t-pw"), "loginStatus never returns the password");
+});
+
+test("login: a blank password keeps the existing one (edit without re-typing)", () => {
+  const before = readFileSync(resolve(dir, ".env"), "utf8");
+  saveLogin(JSON.stringify({ username: "bob@example.com", password: "", submitLabel: "Sign in" }));
+  const env = readFileSync(resolve(dir, ".env"), "utf8");
+  assert.match(env, /TEST_PASSWORD=s3cr3t-pw/, "the old password is untouched");
+  assert.match(env, /TEST_USERNAME=bob@example\.com/, "username updated");
+  assert.notEqual(env, before);
 });

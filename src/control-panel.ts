@@ -28,6 +28,7 @@ const PORT = Number(process.env.PANEL_PORT) || 7777;
 const TASKS: Record<string, { argv: string[]; label: string; note: string; danger?: boolean }> = {
   preflight: { argv: ["run", "preflight"], label: "Preflight", note: "Is the target up, assets included?" },
   crawl: { argv: ["run", "crawl"], label: "Crawl (anon)", note: "Inventory the site → output/pages.jsonl" },
+  "auth:setup": { argv: ["run", "auth:setup"], label: "Set up login session", note: "Log in once and save the session" },
   "crawl:auth": { argv: ["run", "crawl:auth"], label: "Crawl (logged in)", note: "Needs a saved session" },
   profile: { argv: ["run", "profile"], label: "Tech profile", note: "Server, framework, headers, cookies" },
   coverage: { argv: ["run", "coverage"], label: "Coverage", note: "What nothing tests yet" },
@@ -97,6 +98,112 @@ function currentConfig(): Record<string, unknown> {
   }
 }
 
+// --- login credentials -----------------------------------------------------
+//
+// The username/email and password you enter on the Login tab. The password is a SECRET, so
+// it goes to .env (git-ignored) as TEST_PASSWORD, never into the committed qa.config.json -
+// and it is never read back to the page. Only the non-secret form descriptors (path, field
+// labels, success URL) go into qa.config.json's `login` block. This is why the settings
+// form stays password-free: credentials live on their own tab, and the password lives in .env.
+
+const ENV_PATH = process.env.QA_ENV?.trim() ? resolve(process.env.QA_ENV) : resolve(ROOT, ".env");
+const LOGIN_FIELDS = ["path", "usernameLabel", "passwordLabel", "submitLabel", "successUrl"] as const;
+
+function readEnv(): Map<string, string> {
+  const m = new Map<string, string>();
+  try {
+    for (const line of readFileSync(ENV_PATH, "utf8").split(/\r?\n/)) {
+      const eq = line.indexOf("=");
+      if (eq > 0 && !line.trimStart().startsWith("#")) m.set(line.slice(0, eq).trim(), line.slice(eq + 1));
+    }
+  } catch {
+    /* no .env yet */
+  }
+  return m;
+}
+/** Update only the given keys in .env, preserving every other line. */
+function writeEnv(updates: Record<string, string>): void {
+  let lines: string[] = [];
+  try {
+    lines = readFileSync(ENV_PATH, "utf8").split(/\r?\n/);
+  } catch {
+    /* create it */
+  }
+  const remaining = { ...updates };
+  const out = lines.map((line) => {
+    const eq = line.indexOf("=");
+    if (eq > 0) {
+      const key = line.slice(0, eq).trim();
+      if (key in remaining) {
+        const v = remaining[key];
+        delete remaining[key];
+        return `${key}=${v}`;
+      }
+    }
+    return line;
+  });
+  for (const [k, v] of Object.entries(remaining)) out.push(`${k}=${v}`);
+  writeFileSync(ENV_PATH, out.filter((l, i) => !(l === "" && i === out.length - 1)).join("\n") + "\n");
+}
+
+/** What the Login tab shows. Never includes the password value - only whether one is set. */
+export function loginStatus(): { username: string; passwordSet: boolean; login: Record<string, string> } {
+  const env = readEnv();
+  const cfg = currentConfig();
+  const login = (cfg.login ?? {}) as Record<string, string>;
+  const descriptors: Record<string, string> = {};
+  for (const k of LOGIN_FIELDS) descriptors[k] = login[k] ?? "";
+  return {
+    username: env.get("TEST_USERNAME") || String(login.username ?? ""),
+    passwordSet: !!(env.get("TEST_PASSWORD") || login.password),
+    login: descriptors,
+  };
+}
+
+/**
+ * Save login details from the panel. Password (if provided) and username go to .env; the
+ * form descriptors go to qa.config.json's `login` block, validated like any config write.
+ * The password is never written to qa.config.json and never returned to the caller.
+ */
+export function saveLogin(bodyJson: string): { ok: true; passwordSet: boolean } | { ok: false; error: string } {
+  let body: Record<string, string>;
+  try {
+    body = JSON.parse(bodyJson);
+  } catch {
+    return { ok: false, error: "the form sent invalid JSON" };
+  }
+  // 1. non-secret descriptors -> qa.config.json login block (merge + validate).
+  const merged = currentConfig();
+  const login = { ...((merged.login as Record<string, unknown>) ?? {}) };
+  for (const k of LOGIN_FIELDS) if (typeof body[k] === "string" && body[k] !== "") login[k] = body[k];
+  // username is handy to keep in config too (env still wins); password NEVER goes here.
+  if (typeof body.username === "string" && body.username !== "") login.username = body.username;
+  delete (login as Record<string, unknown>).password;
+  merged.login = login;
+  const text = JSON.stringify(merged, null, 2) + "\n";
+  const tmp = resolve(OUT, ".qa-config.validate.json");
+  try {
+    mkdirSync(OUT, { recursive: true });
+    writeFileSync(tmp, text, { mode: 0o600 });
+    loadConfig(tmp);
+  } catch (e) {
+    return { ok: false, error: describeConfigError(e) };
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+  }
+  writeFileSync(CONFIG_PATH, text);
+  // 2. secrets -> .env. Password only when a non-empty one was given (blank = keep current).
+  const envUpdates: Record<string, string> = {};
+  if (typeof body.username === "string" && body.username !== "") envUpdates.TEST_USERNAME = body.username;
+  if (typeof body.password === "string" && body.password !== "") envUpdates.TEST_PASSWORD = body.password;
+  if (Object.keys(envUpdates).length) writeEnv(envUpdates);
+  return { ok: true, passwordSet: loginStatus().passwordSet };
+}
+
 function fieldValue(cfg: Record<string, unknown>, f: FieldMeta): unknown {
   const v = cfg[f.key];
   return v === undefined ? f.default : v;
@@ -138,6 +245,7 @@ export function page(): string {
   const NAV = [
     ["dashboard", "Dashboard", "◱"],
     ["settings", "Settings", "⚙"],
+    ["login", "Login", "⚿"],
     ["run", "Run", "▶"],
     ["live", "Live crawl", "≡"],
     ["results", "Results", "✓"],
@@ -273,6 +381,28 @@ table{width:100%;border-collapse:collapse;font:12px/1.5 ui-monospace,monospace}
         <div class="savebar"><button id="save" class="btn-primary">Save settings</button><span class="status" id="saveStatus" style="margin:0"></span></div>
       </section>
 
+      <section class="view" id="view-login" hidden>
+        <h2>Login</h2>
+        <p class="lede">For sites behind a sign-in. Enter the account the crawler should log in as, then <b>Set up login session</b> saves a session so <b>Crawl (logged in)</b> can go past the login.</p>
+        <div class="card"><h3>Credentials</h3>
+          <div class="field"><label for="lg_user">Username or email</label><div class="help">The account to log in as.</div>
+            <input type="text" id="lg_user" autocomplete="off" placeholder="user@example.com"></div>
+          <div class="field"><label for="lg_pass">Password</label><div class="help">Stored in <code>.env</code> on this machine (git-ignored) as <code>TEST_PASSWORD</code>, never in <code>qa.config.json</code> and never shown back. Leave blank to keep the current one.</div>
+            <input type="password" id="lg_pass" autocomplete="new-password" placeholder="••••••••"></div>
+          <div class="status" id="lg_passState"></div>
+        </div>
+        <div class="card"><h3>Sign-in form (how to log in)</h3>
+          <div class="field"><label for="lg_path">Login page path</label><div class="help">Relative to the base URL, e.g. <code>/login</code>.</div><input type="text" id="lg_path" placeholder="/login"></div>
+          <div class="field"><label for="lg_userLabel">Username field label</label><div class="help">The label, placeholder or name of the identifier field.</div><input type="text" id="lg_usernameLabel" placeholder="Username"></div>
+          <div class="field"><label for="lg_passLabel">Password field label</label><input type="text" id="lg_passwordLabel" placeholder="Password"></div>
+          <div class="field"><label for="lg_submit">Submit button label</label><input type="text" id="lg_submitLabel" placeholder="Login"></div>
+          <div class="field"><label for="lg_success">Success URL (regex)</label><div class="help">A URL the site reaches only after a successful login, e.g. <code>/secure$</code> or <code>/dashboard</code>.</div><input type="text" id="lg_successUrl" placeholder="/secure$"></div>
+        </div>
+        <div class="savebar"><button id="saveLogin" class="btn-primary">Save login</button>
+          <button id="goSetup">Set up login session →</button>
+          <span class="status" id="lg_status" style="margin:0"></span></div>
+      </section>
+
       <section class="view" id="view-run" hidden>
         <h2>Run</h2>
         <p class="lede">Start a step; its output streams below. One runs at a time.</p>
@@ -310,13 +440,14 @@ table{width:100%;border-collapse:collapse;font:12px/1.5 ui-monospace,monospace}
 <script>
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 // --- view routing ---
-const TITLES={dashboard:"Dashboard",settings:"Settings",run:"Run",live:"Live crawl",results:"Results",mcp:"MCP tools"};
+const TITLES={dashboard:"Dashboard",settings:"Settings",login:"Login",run:"Run",live:"Live crawl",results:"Results",mcp:"MCP tools"};
 function show(view){
   if(!TITLES[view])view="dashboard";
   $$(".view").forEach(s=>s.hidden=(s.id!=="view-"+view));
   $$(".navlink").forEach(a=>a.classList.toggle("on",a.dataset.view===view));
   $("#viewTitle").textContent=TITLES[view];
   if(view==="dashboard")refreshStatus();
+  if(view==="login")loadLogin();
 }
 addEventListener("hashchange",()=>show(location.hash.slice(1)));
 $$("[data-nav]").forEach(b=>b.onclick=()=>location.hash=b.dataset.nav);
@@ -337,6 +468,21 @@ async function save(){const st=$('#saveStatus');st.textContent='Saving…';st.cl
     else{st.textContent='Not saved: '+j.error;st.className='status bad';}
   }catch(e){st.textContent='Error: '+e.message;st.className='status bad';}}
 $('#save').onclick=save;
+// --- login ---
+async function loadLogin(){try{const j=await (await fetch('/login-status')).json();
+  $('#lg_user').value=j.username||'';
+  $('#lg_passState').textContent=j.passwordSet?'A password is already saved (leave blank to keep it).':'No password saved yet.';
+  const L=j.login||{};['path','usernameLabel','passwordLabel','submitLabel','successUrl'].forEach(k=>{const el=$('#lg_'+k);if(el)el.value=L[k]||'';});
+}catch{}}
+$('#saveLogin').onclick=async()=>{const st=$('#lg_status');st.textContent='Saving…';st.className='status';
+  const body={username:$('#lg_user').value.trim(),password:$('#lg_pass').value,
+    path:$('#lg_path').value.trim(),usernameLabel:$('#lg_usernameLabel').value.trim(),passwordLabel:$('#lg_passwordLabel').value.trim(),
+    submitLabel:$('#lg_submitLabel').value.trim(),successUrl:$('#lg_successUrl').value.trim()};
+  try{const j=await (await fetch('/login-save',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+    if(j.ok){st.textContent='Saved ✓';st.className='status ok';$('#lg_pass').value='';loadLogin();}
+    else{st.textContent='Not saved: '+j.error;st.className='status bad';}
+  }catch(e){st.textContent='Error: '+e.message;st.className='status bad';}};
+$('#goSetup').onclick=()=>startTask('auth:setup');
 // --- run ---
 let es=null;
 function setRunning(on){$$('button.run,[data-go]').forEach(b=>b.disabled=on);$('#stop').disabled=!on;}
@@ -644,6 +790,11 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === "GET" && url.pathname === "/live") return liveStream(res);
   if (req.method === "GET" && url.pathname === "/status") return send(res, 200, "application/json", JSON.stringify(runStatus()));
+  if (req.method === "GET" && url.pathname === "/login-status") return send(res, 200, "application/json", JSON.stringify(loginStatus()));
+  if (req.method === "POST" && url.pathname === "/login-save") {
+    if (!isLocalRequest(req.headers, PORT, { checkOrigin: true })) return send(res, 403, "text/plain", "forbidden");
+    return send(res, 200, "application/json", JSON.stringify(saveLogin(await readBody(req))));
+  }
   if (req.method === "POST" && url.pathname === "/stop") {
     if (!isLocalRequest(req.headers, PORT, { checkOrigin: true })) return send(res, 403, "text/plain", "forbidden");
     if (running && !running.killed) running.kill();

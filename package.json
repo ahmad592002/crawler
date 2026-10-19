@@ -6,6 +6,7 @@
     "test": "playwright test",
     "crawl": "tsx src/crawl.ts --mode=anon",
     "crawl:auth": "tsx src/crawl.ts --mode=auth",
+    "auth:setup": "playwright test --project=setup",
     "report": "tsx src/report.ts",
     "qa": "tsx src/qa.ts",
     "typecheck": "tsc --noEmit",

@@ -51,6 +51,17 @@
   attempt budget is spent, or two attempts make no progress, then writes a run report. It only
   makes safe config nudges, never invents credentials, and refuses an unauthorized target.
 
+## Unreleased — panel Login tab
+
+- The control panel has a **Login** tab to set the crawler's sign-in: username/email,
+  password, and the sign-in form details (login path, field labels, submit label, success
+  URL). **Set up login session** runs `npm run auth:setup` (new script) and then **Crawl
+  (logged in)** works. The **password goes to `.env`** (git-ignored) as `TEST_PASSWORD`,
+  never into the committed `qa.config.json`, and is never read back to the page; only the
+  non-secret form descriptors go to the config's `login` block. `.env`'s location can be
+  overridden with `QA_ENV`. New tests pin that the password reaches `.env` and never the
+  config or the status response.
+
 ## Unreleased — control panel redesign (multi-view)
 
 - The control panel is now a clean sidebar app with one view per function — **Dashboard**
