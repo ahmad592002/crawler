@@ -115,6 +115,7 @@ correctly — the day someone fixes it. Nothing to remember to re-enable.
 
 | Page | Read it when |
 |---|---|
+| [docs/running.md](docs/running.md) | **Setting it up and running it on another machine — step by step** |
 | [docs/architecture.md](docs/architecture.md) | You want to know what runs, in what order, and why |
 | [docs/agents.md](docs/agents.md) | Running the Claude agent team (`/qa-team`), one agent per step |
 | [docs/configuration.md](docs/configuration.md) | Pointing at a new site, or a knob isn't behaving |

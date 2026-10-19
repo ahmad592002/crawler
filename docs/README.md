@@ -4,6 +4,7 @@ The root [`README.md`](../README.md) is the quick start. These pages are the ref
 
 | Page | Read it when |
 |---|---|
+| [running.md](running.md) | You are setting this up and running it on another machine, step by step. |
 | [architecture.md](architecture.md) | You want to know what actually runs, in what order, and why the pipeline is split the way it is. |
 | [configuration.md](configuration.md) | You are pointing this at a new site, or a knob is not doing what you expected. |
 | [safety.md](safety.md) | **Before you run this against anything you care about.** What the guardrails cover, what they provably do not, and the threat model. |
