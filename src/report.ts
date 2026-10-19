@@ -192,6 +192,19 @@ const esc = (s: unknown): string =>
     .replace(/'/g, "&#39;");
 
 /**
+ * Render the "Deep scan" report section from the contents of output/deepscan.md.
+ * Pure + exported so it is unit-testable. Empty input → "" (section omitted); the
+ * markdown is HTML-escaped, so a malicious path or label cannot inject markup.
+ */
+export function renderDeepScan(md: string): string {
+  const txt = (md ?? "").trim();
+  if (!txt) return "";
+  return `<h2>Deep scan (generated templates + triage)</h2>
+<p class="muted">From <code>npm run deepscan</code> — target-specific attack templates generated from this crawl's capture, scanned, and triaged with confidence scoring. See the linked triage report for ranked findings.</p>
+<pre class="ncmd">${esc(txt)}</pre>`;
+}
+
+/**
  * Escape a value for use in an href.
  *
  * esc() is not enough: it leaves "javascript:alert(1)" completely intact, and every URL
@@ -600,6 +613,14 @@ ${nuclei
         .join("")}`
     : "";
 
+  // Deep scan — present only after `npm run deepscan --engine custom|both`. deepscan.md
+  // carries just engine/target/label/report-path (no capture contents), so it is safe to show.
+  const deepScanSection = (() => {
+    const f = resolve(OUT, "deepscan.md");
+    if (!existsSync(f)) return "";
+    try { return renderDeepScan(readFileSync(f, "utf8")); } catch { return ""; }
+  })();
+
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -693,6 +714,7 @@ padding:20px;color:var(--muted)}
 ${execSummary}
 ${siteAnalysis}
 ${nucleiSection}
+${deepScanSection}
 <h2>Findings</h2>
 ${
   findings.length

@@ -23,7 +23,8 @@
     "summary": "tsx src/summary.ts",
     "nuclei:plan": "tsx src/summary.ts",
     "panel": "tsx src/control-panel.ts",
-    "diagnose": "tsx src/diagnose.ts"
+    "diagnose": "tsx src/diagnose.ts",
+    "deepscan": "tsx src/deepscan.ts"
   },
   "type": "module",
   "private": true,

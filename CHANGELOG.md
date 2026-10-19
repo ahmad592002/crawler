@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — Added — nuclei deep-scan engines (`src/deepscan.ts`)
+
+- **`npm run deepscan` with three engines (`--engine official|custom|both`).** Bridges the crawl
+  to the CyberSecurity nuclei-template-generator project. `official` (default) keeps the existing
+  behaviour exactly — the scoped per-category plan over the **official template library only**,
+  printed, never executed, no other project required. `custom` feeds this run's
+  `output/http-history.xml` to that project to GENERATE target-specific attack templates
+  (BOLA/auth/JWT/injection/XSS/misconfig/…), scans with only those, and triages with
+  confidence scoring. `both` runs custom + official as one triaged set.
+- **New optional `customEngine.projectPath` config** (Zod `.strict()`, so unknown keys still
+  error). Absent → only `--engine official` is available; the custom/both engines fail with
+  clear guidance rather than silently.
+- **Safety preserved:** `planDeepScan()` refuses an off-scope or userinfo-smuggled target before
+  anything runs, hands the scanner only `baseUrl`, and passes the capture by path so its live
+  cookies are never printed. Pure planner unit-tested in `src/deepscan.test.ts` (9 cases:
+  engine routing, scope/userinfo refusal, missing-config and missing-capture errors, argv shape,
+  dry-run, path conversion). The orchestration itself calls `<projectPath>/bridge_scan.sh`.
+
 ## Unreleased — Fixed — improvement round 3
 
 - **Control panel Host/CSRF interlock (`src/control-panel.ts`).** Every request must now name
@@ -32,6 +50,15 @@
   and loops run → `diagnose` → apply ONE safe change → re-run, until the run is `settled`, the
   attempt budget is spent, or two attempts make no progress, then writes a run report. It only
   makes safe config nudges, never invents credentials, and refuses an unauthorized target.
+
+## Unreleased — control panel redesign (multi-view)
+
+- The control panel is now a clean sidebar app with one view per function — **Dashboard**
+  (target + run status tiles + quick actions), **Settings**, **Run** (buttons + live output),
+  **Live crawl**, **Results**, **MCP tools** — instead of the cramped two-column page. Added a
+  light/dark theme toggle and a `/status` endpoint feeding the dashboard tiles. All existing
+  endpoints, the task allow-list, and the Host/Origin hardening are unchanged; the panel tests
+  still pass.
 
 ## Unreleased — control panel, live view, watch mode
 

@@ -163,6 +163,23 @@ const ConfigSchema = z.object({
       }).strict(),
     )
     .optional(),
+  /**
+   * Optional bridge to the CyberSecurity nuclei-template-generator project. When set,
+   * `npm run deepscan -- --engine custom|both` feeds this run's Burp capture
+   * (output/http-history.xml) to that project to GENERATE target-specific attack
+   * templates, scan with them (and/or the official library), and triage with
+   * confidence scoring. Leave unset to use only the built-in official-template plan
+   * (`--engine official`, the default — "just nuclei templates, not my own").
+   */
+  customEngine: z
+    .object({
+      /** Absolute path to the CyberSecurity project root (the dir holding bridge_scan.sh). */
+      projectPath: z.string(),
+      /** Official-library tags for the `both`/`official` deep scan. */
+      officialTags: z.string().default("exposure,misconfig,default-login,cve,tech,panel"),
+    })
+    .strict()
+    .optional(),
 });
 
 export type QaConfig = z.infer<typeof ConfigSchema>;

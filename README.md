@@ -57,8 +57,35 @@ see [docs/email.md](docs/email.md) if your site rejects disposable domains.
 | `npm run diagnose` | Read a finished run and print the verdict + ranked retry actions (the core of `/autorun`) |
 | `npm run report` | Build `output/report.html` (now opens with an executive summary and the nuclei plan) |
 | `npm run export:burp` | Rebuild `output/http-history.xml` from the capture |
+| `npm run deepscan` | Nuclei deep scan. `--engine official` (default) prints the scoped official-template plan; `--engine custom`/`both` feed the capture to the CyberSecurity generator for target-specific templates + triage (see below) |
 | `npm run qa` | Everything, in order |
 | `npm run typecheck` | `tsc --noEmit` |
+
+### Deep scan — official templates, your own generated ones, or both
+
+`npm run deepscan` picks the nuclei engine with `--engine`:
+
+| `--engine` | What runs | Needs |
+|---|---|---|
+| `official` *(default)* | The built-in scoped per-category plan — **official nuclei templates only, no custom generation.** Prints the commands; never executes them. | nothing extra |
+| `custom` | Feeds this run's `output/http-history.xml` to the **CyberSecurity** template-generator project to build target-specific attack templates (BOLA/auth/JWT/injection/XSS/…), scans with **only those**, then triages with confidence scoring. | `customEngine.projectPath` in `qa.config.json` |
+| `both` | `custom` **+** the official library together, triaged as one set. | same |
+
+```jsonc
+// qa.config.json
+"customEngine": { "projectPath": "C:/path/to/CyberSecurity/...pentesting-config-context" }
+```
+
+```bash
+npm run crawl && npm run export:burp      # produce output/http-history.xml
+npm run deepscan -- --engine both         # crawl → custom templates + official → scan → triage
+npm run deepscan -- --engine official     # or just the official plan, unchanged
+npm run deepscan -- --engine custom --dry-run   # show the exact commands without running
+```
+
+Only `baseUrl` (which must be in `allowedOrigins`) is handed to the scanner, and the capture is
+passed by path — its contents (live cookies) are never printed into reports. The triage report
+lands under the CyberSecurity project; `output/deepscan.md` points to it.
 
 `npm run qa` continues to the report even when tests fail — a failing suite is when you
 most want the report — and exits non-zero on any critical/high finding.

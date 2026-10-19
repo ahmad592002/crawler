@@ -172,7 +172,10 @@ export function buildRecommendations(pages: PageRecord[], tech: TechProfile | nu
   const uCommand = (rest: string): string => (baseOk ? `nuclei -u ${baseArg} ${rest}` : baseNote);
 
   // 1. Baseline: passive-leaning templates over the whole site, tuned by the stack.
-  const tags = ["cves", "exposures", "misconfiguration", "default-logins", "exposed-panels", "tech", ...techTags(tech)];
+  // Canonical nuclei tag names (verified against the v3.11.1 library — the plural/
+  // variant forms "cves"/"exposures"/"misconfiguration"/"default-logins"/"exposed-panels"
+  // match almost nothing; "cve"/"exposure"/"misconfig"/"default-login"/"panel" are the real ones).
+  const tags = ["cve", "exposure", "misconfig", "default-login", "panel", "tech", ...techTags(tech)];
   recs.push({
     id: "baseline",
     title: "Baseline scan (whole site)",
@@ -210,7 +213,7 @@ export function buildRecommendations(pages: PageRecord[], tech: TechProfile | nu
       why: `Cookie(s) missing Secure/HttpOnly: ${cookies.join(", ")}. A session cookie without them is exposed to theft.`,
       fix: "Set Secure and HttpOnly on every session cookie, and SameSite=Lax or Strict.",
       endpoints: [],
-      command: uCommand(`-tags misconfiguration -id cookies-without-secure,cookies-without-httponly ${pace}`),
+      command: uCommand(`-tags misconfig -id cookies-without-secure,cookies-without-httponly ${pace}`),
       templates: "cookies-without-secure, cookies-without-httponly",
       severity: "info–low",
       intrusive: false,
@@ -225,8 +228,8 @@ export function buildRecommendations(pages: PageRecord[], tech: TechProfile | nu
       why: "Login, registration and account pages: default credentials, exposed admin panels and auth-bypass templates concentrate here.",
       fix: "Remove default/weak logins, lock down exposed panels, and rate-limit the login route.",
       endpoints: cat.auth,
-      command: `nuclei -l {list} -tags default-logins,exposed-panels,auth-bypass -severity medium,high,critical ${pace}`,
-      templates: "default-logins, exposed-panels, auth-bypass",
+      command: `nuclei -l {list} -tags default-login,panel,auth-bypass -severity medium,high,critical ${pace}`,
+      templates: "default-login, panel, auth-bypass",
       severity: "medium–critical",
       intrusive: false,
     });
@@ -240,8 +243,8 @@ export function buildRecommendations(pages: PageRecord[], tech: TechProfile | nu
       why: "Pages with text inputs are the injection surface: reflected XSS, SQLi, SSRF, LFI. This sends crafted payloads, so run it only against a target you own or have written permission to test.",
       fix: "Validate and encode every input server-side; use parameterised queries; allow-list any URL or path a form accepts.",
       endpoints: cat.forms,
-      command: `nuclei -l {list} -dast -tags xss,sqli,ssrf,lfi -severity medium,high,critical ${pace}`,
-      templates: "xss, sqli, ssrf, lfi (DAST fuzzing)",
+      command: `nuclei -l {list} -dast -tags xss,sqli,ssrf,lfi,cmdi,ssti -fuzz-aggression low -severity medium,high,critical ${pace}`,
+      templates: "xss, sqli, ssrf, lfi, cmdi, ssti (DAST fuzzing; -fuzz-aggression low)",
       severity: "medium–critical",
       intrusive: true,
     });
@@ -255,8 +258,8 @@ export function buildRecommendations(pages: PageRecord[], tech: TechProfile | nu
       why: "Upload forms can allow unrestricted file upload leading to code execution.",
       fix: "Allow-list extensions and content types, store outside the web root, and never execute uploaded files.",
       endpoints: cat.upload,
-      command: `nuclei -l {list} -tags fileupload,rce -severity high,critical ${pace}`,
-      templates: "fileupload, rce",
+      command: `nuclei -l {list} -tags file-upload,rce -severity high,critical ${pace}`,
+      templates: "file-upload, rce",
       severity: "high–critical",
       intrusive: true,
     });

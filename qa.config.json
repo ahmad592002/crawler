@@ -83,5 +83,8 @@
   "requestDelayMs": 400,
   "maxRequests": 1200,
   "rateLimitBreakAfter": 5,
-  "rateLimitRetries": 3
+  "rateLimitRetries": 3,
+  "customEngine": {
+    "projectPath": "C:/Users/ahmad/OneDrive/Desktop/CyberSecurity/tnexus-ssdlc-main/tnexus-ssdlc-main/tnexus-pentesting-config-context"
+  }
 }

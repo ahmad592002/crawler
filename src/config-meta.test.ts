@@ -13,8 +13,8 @@ import { resolve } from "node:path";
 import { ROOT } from "./config.js";
 import { FIELDS, GROUPS } from "./config-meta.js";
 
-/** The two structured fields the editor renders as their own sections, not as plain inputs. */
-const HANDLED_SEPARATELY = new Set(["login", "personas"]);
+/** Structured fields the editor renders as their own sections, not as plain inputs. */
+const HANDLED_SEPARATELY = new Set(["login", "personas", "customEngine"]);
 
 /** Pull the top-level field names out of the Zod schema source. */
 function schemaKeys(): string[] {
